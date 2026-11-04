@@ -1642,3 +1642,24 @@ class TestAutoscaleSignAndBaseline:
         _, rmsd, _ = compute_residuals(np.array([1.0]), data, mw, ph,
                                        FitOptions(autoscale='none', baseline=1, target='fcn'))
         assert rmsd < 1e-12
+
+
+class TestDictStyleArrayFields:
+    """Every element of an array field must reach the model, not only the last."""
+
+    def test_to_dict_applies_every_element(self):
+        from torchspin.esfit import ParameterHandler
+        exp = Experiment(mwFreq=9.65, Range=[300.0, 440.0], nPoints=64)
+        sys0 = SpinSystem(S=[0.5], g=[[2.0, 2.0, 2.0]], Nucs=['1H'], A=[[10.0, 10.0, 10.0]],
+                          lw=[1.0, 2.0])
+        ph = ParameterHandler({'Sys': sys0, 'Exp': exp},
+                              vary={'Sys': {'g': [[0.1, 0.1, 0.0]], 'A': [[5.0, 0, 0]],
+                                            'lw': [0.5, 0.5]}})
+        p = ph.p0_active + np.array([0.01, 0.02, 1.0, 0.1, 0.2])
+        d = ph._handler.to_dict(p)
+        np.testing.assert_allclose(d['Sys'].g.numpy(), [[2.01, 2.02, 2.0]])
+        np.testing.assert_allclose(d['Sys'].A.numpy(), [[11.0, 10.0, 10.0]])
+        np.testing.assert_allclose(d['Sys'].lw, [1.1, 2.2])
+        # p0 itself is untouched
+        np.testing.assert_allclose(sys0.g.numpy(), [[2.0, 2.0, 2.0]])
+        assert sys0.lw == [1.0, 2.0]

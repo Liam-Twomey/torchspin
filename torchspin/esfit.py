@@ -563,20 +563,22 @@ class TorchSpinParameterHandler:
             field = entry['field']
             new_val = pvec_full[i]
             
-            # Get original value to preserve type (torch.Tensor, list, float)
-            original_obj = self.p0_dict[entry['key']]
-            original_val = getattr(original_obj, field)
-            
+            # Current value in the copy being built (type preserved: tensor,
+            # list, float). It must be the copy, not p0: reading p0 for every
+            # element made each element of an array field overwrite the ones
+            # set before it, so only its last element ever reached the model.
+            original_val = getattr(obj, field)
+
             if entry['index'] is not None:
                 # Array parameter - update single element
                 if isinstance(original_val, torch.Tensor):
                     # Convert to numpy, modify, convert back to tensor
-                    arr = original_val.cpu().numpy().copy()
+                    arr = original_val.detach().cpu().numpy().copy()
                     arr[entry['index']] = new_val
                     arr_tensor = torch.tensor(arr, dtype=original_val.dtype, device=original_val.device)
                     setattr(obj, field, arr_tensor)
                 else:
-                    arr = np.asarray(original_val)
+                    arr = np.array(original_val, dtype=float)
                     arr[entry['index']] = new_val
                     setattr(obj, field, arr.tolist() if isinstance(original_val, list) else arr)
             else:

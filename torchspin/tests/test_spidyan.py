@@ -478,3 +478,35 @@ class TestPhaseCycling:
         }
         t, signal, info = spidyan(sys, exp)
         assert info.FinalState is not None
+
+
+# --- GitHub #8: silent validity limits -------------------------------------
+
+def _qband_pi(**opt):
+    import warnings as _w
+    from torchspin.spidyan import spidyan, SpidyanOptions
+    from torchspin.tests.test_spidyan_matlab_validation import _zsys
+    p = {'Type': 'rectangular', 'tp': 0.02, 'Flip': np.pi}            # nu1 = 25 MHz
+    exp = {'Field': 1195.4, 'mwFreq': 33.5, 'Sequence': [p], 'DetSequence': [1],
+           'DetOperator': ['z1'], 'DetPhase': 0.0}
+    with _w.catch_warnings(record=True) as rec:
+        _w.simplefilter('always')
+        spidyan(_zsys(), exp, SpidyanOptions(**opt))
+    return [str(r.message) for r in rec if str(r.message).startswith('spidyan:')]
+
+
+def test_no_validity_warning_with_defaults_or_validated_settings():
+    assert _qband_pi() == []
+    assert _qband_pi(IntTimeStep=1e-4, SimFreq=32) == []   # the EasySpin-validated setup
+    assert _qband_pi(SimFreq=33.0) == []                   # carrier offset 20·nu1
+
+
+def test_coarse_int_time_step_warns():
+    msgs = _qband_pi(IntTimeStep=2e-4)
+    assert len(msgs) == 1 and 'IntTimeStep' in msgs[0]
+
+
+@pytest.mark.parametrize('sim_freq', [33.4, 33.5])
+def test_sim_freq_near_carrier_warns(sim_freq):
+    msgs = _qband_pi(SimFreq=sim_freq)
+    assert len(msgs) == 1 and 'SimFreq' in msgs[0]

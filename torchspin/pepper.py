@@ -1032,8 +1032,15 @@ def pepper(sys_or_list, exp: Experiment, opt: Optional[Options] = None):
 
     Notes
     -----
-    * Only the matrix-diagonalization method is implemented (set via
-      ``Options.Method='matrix'``).
+    * ``Options.Method``: ``'matrix'`` (default, exact diagonalization),
+      ``'perturb'``/``'perturb1'``/``'perturb2'`` or ``'hybrid'``. Second-order
+      perturbation theory is inaccurate when A is a sizable fraction of the
+      microwave frequency. For isotropic 91Zr with A = 780 MHz at 9.65 GHz
+      (A/nu = 0.08), ``'perturb'`` differs from ``'matrix'`` by 0.18 relative
+      L2. Use ``'matrix'`` there.
+    * If any SpinSystem/Experiment tensor requires grad, pepper runs
+      :func:`torchspin.pepper_autograd.pepper_autograd` and returns a spectrum
+      on the autograd graph.
     * Powder averaging uses the SOPHE grid (Wang & Hanson, 1995).
     * Lineshape convolution is FFT-based.
     * Strain broadening adds per-transition widths in quadrature with

@@ -696,7 +696,54 @@ def _sequencer(exp, opt):
 
             vary.IncrementationTable.append(inc_table)
 
+    _warn_validity_limits(sequence, events, opt, freq_shift, sim_max_freq, int_time_step)
     return events, vary, frame_shift, int_time_step, single_point_detection
+
+
+def _warn_validity_limits(sequence, events, opt, freq_shift, sim_max_freq, int_time_step):
+    """Warn about user settings that silently degrade the pulses (GitHub #8).
+
+    Calibrated on a rectangular pi pulse at Q-band: an integration step of
+    Nyquist/5 leaves an error of 5e-4 in <Sz>, Nyquist/2.5 1.4 %, Nyquist/2
+    about 3 % and Nyquist 40 %. A simulation frame closer to the carrier than
+    a few nutation frequencies breaks the separation of the co- and
+    counter-rotating components: carrier offset 4·nu1 gives 0.8 %, 2·nu1 3.6 %.
+    """
+    if opt.IntTimeStep is not None and sim_max_freq > 0:
+        nyquist_time = 1e-3 / (2 * sim_max_freq)          # µs
+        if int_time_step > nyquist_time / 2:
+            warnings.warn(
+                f"spidyan: Opt.IntTimeStep = {int_time_step:.3g} µs is coarser than "
+                f"{nyquist_time / 2:.3g} µs, half the Nyquist step of the highest "
+                f"simulation-frame frequency ({sim_max_freq:.4g} GHz), so pulses are "
+                f"inaccurate (a pi pulse at Nyquist/2 is off by ~3 %). Leave "
+                f"IntTimeStep unset for the automatic step "
+                f"({_round_significant(nyquist_time / 50, 2):.2g} µs), or move "
+                f"Opt.SimFreq closer to the carrier.", UserWarning, stacklevel=4)
+    if opt.SimFreq is not None and opt.SimFreq != 0:
+        pulse_elems = [e for e in sequence if isinstance(e, dict) and 'tp' in e]
+        pulse_events = [e for e in events if isinstance(e, PulseEvent)]
+        worst = None
+        for elem, evt in zip(pulse_elems, pulse_events):
+            if 'IQ' in elem:
+                continue
+            nu1 = float(np.max(np.abs(evt.IQ))) if np.size(evt.IQ) else 0.0   # MHz
+            if nu1 <= 0:
+                continue
+            f_rel = np.atleast_1d(elem.get('Frequency', 0.0)).astype(float)   # MHz
+            carrier = freq_shift * 1e3 + float(np.min(f_rel))                  # MHz, sim frame
+            ratio = carrier / nu1
+            if worst is None or ratio < worst[0]:
+                worst = (ratio, carrier, nu1)
+        if worst is not None and worst[0] < 5:
+            _, carrier, nu1 = worst
+            warnings.warn(
+                f"spidyan: Opt.SimFreq = {opt.SimFreq} GHz puts the lowest pulse carrier "
+                f"{carrier:.4g} MHz above the simulation frame, less than 5 times the "
+                f"nutation frequency ({nu1:.3g} MHz). The co- and counter-rotating "
+                f"components are no longer separated and pulses are inaccurate (or "
+                f"absent at offset 0). Lower Opt.SimFreq, or leave it unset.",
+                UserWarning, stacklevel=4)
 
 
 # ---------------------------------------------------------------------------

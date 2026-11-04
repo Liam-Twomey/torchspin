@@ -59,5 +59,5 @@ deterministically for a given seed) and the differentiable losses
 
 ## Tests
 
-`python -m pytest` runs the full suite (2659 tests, including the MATLAB-validation modules that
+`python -m pytest` runs the full suite (about 2800 tests, including the MATLAB-validation modules that
 compare against the stored references in `tests/data`; no MATLAB installation needed).

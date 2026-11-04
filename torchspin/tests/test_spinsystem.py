@@ -334,3 +334,17 @@ class TestValidateCFCoherence:
         sys = SpinSystem(S=[0.5], L=[2.0], soc=[[100.0]],
                          CF2=[[1.0, 0.0, 0.0, 0.0, 0.0]])
         sys.validate()
+
+
+def test_q_shorthand_principal_values_and_graph():
+    """[e2qQ/h, eta] -> e2qQ/h/(4I(2I-1))·[-1+eta, -1-eta, 2], built with torch
+    ops so a Q that requires grad stays on the graph (GitHub #7)."""
+    import torch
+    from torchspin import SpinSystem
+    q = torch.tensor([[12.0, 0.3]], dtype=torch.float64, requires_grad=True)
+    s = SpinSystem(S=[0.5], g=2.0, Nucs=['14N'], A=[[1.0, 1.0, 1.0]], Q=q)
+    k = 12.0 / (4 * 1 * (2 * 1 - 1))
+    torch.testing.assert_close(s.Q.detach(), torch.tensor([[k * -0.7, k * -1.3, k * 2.0]], dtype=torch.float64))
+    assert s.Q.requires_grad
+    s.Q.sum().backward()
+    assert q.grad is not None

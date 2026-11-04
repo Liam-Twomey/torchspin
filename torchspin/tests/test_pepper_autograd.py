@@ -270,3 +270,84 @@ def test_field_modulation_forward_and_gradient():
         return pepper(SpinSystem(**sd, A=[[20.0, 21.0, 85.0 + d]]), exp, opt)[1][::4]
     fd = (f(h) - f(-h)) / (2 * h)
     assert float((J[:, 2] - fd).norm() / fd.norm()) < 1e-5
+
+
+# --- GitHub #7: pepper dispatch, isotope mixtures, Q shorthand ---------------
+
+def _zr_case():
+    from torchspin import Experiment
+    from torchspin.experiment import Options
+    return (Experiment(mwFreq=9.65, Range=[300.0, 400.0], nPoints=256, Harmonic=1),
+            Options(GridSize=[7, 2]))
+
+
+def test_pepper_dispatches_to_autograd_when_inputs_require_grad():
+    import warnings
+    from torchspin import SpinSystem, pepper
+    from torchspin.pepper_autograd import pepper_autograd
+    exp, opt = _zr_case()
+    g = torch.tensor([[2.0, 1.9, 1.9]], dtype=torch.float64, requires_grad=True)
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', UserWarning)     # no tensor-to-scalar warning
+        _, y = pepper(SpinSystem(S=[0.5], g=g, lw=[1.0, 0.0]), exp, opt)
+    assert y.grad_fn is not None
+    _, y_ad = pepper_autograd(SpinSystem(S=[0.5], g=g, lw=[1.0, 0.0]), exp, opt)
+    assert torch.equal(y.detach(), y_ad.detach())
+    y.sum().backward()
+    assert g.grad is not None and torch.isfinite(g.grad).all()
+
+
+def test_pepper_on_graph_unsupported_config_names_pepper_autograd():
+    from torchspin import SpinSystem, pepper
+    from torchspin.experiment import Options
+    exp, _ = _zr_case()
+    g = torch.tensor([[2.0, 1.9, 1.9]], dtype=torch.float64, requires_grad=True)
+    sys = SpinSystem(S=[0.5], g=g, Nucs=['1H'], A=[[10.0, 10.0, 10.0]], lw=[1.0, 0.0])
+    with pytest.raises(NotImplementedError, match="pepper_autograd.*hybrid"):
+        pepper(sys, exp, Options(GridSize=[7, 2], Method='hybrid'))
+
+
+def test_pepper_autograd_expands_natural_abundance_and_weight():
+    from torchspin import SpinSystem, pepper
+    from torchspin.pepper_autograd import pepper_autograd
+    exp, opt = _zr_case()
+    kw = dict(S=[0.5], Nucs=['Zr'], A=[[780.0] * 3], lw=[1.0, 0.0], weight=0.3)
+    g = torch.tensor([[2.0, 1.9, 1.9]], dtype=torch.float64, requires_grad=True)
+    _, y = pepper_autograd(SpinSystem(g=g, **kw), exp, opt)
+    with torch.no_grad():
+        _, y_ref = pepper(SpinSystem(g=g.detach(), **kw), exp, opt)
+    assert (y.detach() - y_ref).norm() / y_ref.norm() < 1e-9
+
+    # gradient w.r.t. A through the isotopologue sum matches central differences
+    target = y_ref * 1.1
+    def loss(a):
+        A = a * torch.ones(1, 3, dtype=torch.float64)
+        sys = SpinSystem(S=[0.5], g=[[2.0, 1.9, 1.9]], Nucs=['Zr'], A=A, lw=[1.0, 0.0])
+        return ((pepper_autograd(sys, exp, opt)[1] - target) ** 2).mean()
+    a = torch.tensor(790.0, dtype=torch.float64, requires_grad=True)
+    loss(a).backward()
+    h = 0.01
+    with torch.no_grad():
+        fd = (loss(torch.tensor(790.0 + h, dtype=torch.float64))
+              - loss(torch.tensor(790.0 - h, dtype=torch.float64))) / (2 * h)
+    assert abs(a.grad.item() - fd.item()) <= 1e-5 * abs(fd.item())
+
+
+def test_q_shorthand_keeps_the_graph():
+    from torchspin import SpinSystem, Experiment, pepper
+    from torchspin.experiment import Options
+    exp = Experiment(mwFreq=9.65, Range=[250.0, 470.0], nPoints=400, Harmonic=1)
+    opt = Options(GridSize=[7, 2])
+    pref = 1 / (4 * 2.5 * (2 * 2.5 - 1))            # I = 5/2
+    base = dict(S=[0.5], g=[[2.0, 1.9, 1.895]], Nucs=['91Zr'], A=[[810.0, 805.0, 815.0]], lw=[0.3, 0.4])
+    target = pepper(SpinSystem(**base, Q=[[-30 * pref, -30 * pref, 60 * pref]]), exp, opt)[1]
+
+    def loss(q):
+        Q = torch.stack([q, torch.zeros_like(q)]).reshape(1, 2)     # [e2qQ/h, eta]
+        return ((pepper(SpinSystem(**base, Q=Q), exp, opt)[1] - target) ** 2).mean()
+    q = torch.tensor(20.0, dtype=torch.float64, requires_grad=True)
+    loss(q).backward()
+    with torch.no_grad():
+        fd = (loss(torch.tensor(20.005, dtype=torch.float64))
+              - loss(torch.tensor(19.995, dtype=torch.float64))) / 0.01
+    assert abs(q.grad.item() - fd.item()) <= 1e-4 * abs(fd.item())

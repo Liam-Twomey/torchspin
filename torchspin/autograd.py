@@ -36,12 +36,35 @@ from typing import Optional
 
 import torch
 
-__all__ = ['differentiable_spectrum']
+__all__ = ['differentiable_spectrum', 'inputs_require_grad']
 
 
 # ---------------------------------------------------------------------------
 # N-spin broadband helpers
 # ---------------------------------------------------------------------------
+
+def inputs_require_grad(*objs) -> bool:
+    """True if any tensor field of the given SpinSystem/Experiment objects (or
+    lists of them) requires grad. Lists and tuples of tensors (e.g. ``lw``) are
+    searched one level deep."""
+    import dataclasses
+
+    def _rg(v) -> bool:
+        if torch.is_tensor(v):
+            return bool(v.requires_grad)
+        if isinstance(v, (list, tuple)):
+            return any(torch.is_tensor(u) and u.requires_grad for u in v)
+        return False
+
+    for obj in objs:
+        items = obj if isinstance(obj, (list, tuple)) else [obj]
+        for it in items:
+            if it is None or not dataclasses.is_dataclass(it):
+                continue
+            if any(_rg(getattr(it, f.name, None)) for f in dataclasses.fields(it)):
+                return True
+    return False
+
 
 def _broadband_spectrum(
     sys: 'SpinSystem',

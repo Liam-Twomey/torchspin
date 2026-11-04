@@ -567,13 +567,14 @@ class SpinSystem:
                 for i in range(n_n):
                     nuc = self.Nucs[i]
                     I_q = _quadrupole_spin(nuc)
-                    e2qQh = float(Q[i, 0])
-                    eta = float(Q[i, 1]) if Q.shape[1] == 2 else 0.0
+                    # torch ops only, so a Q that requires grad stays on the graph
+                    e2qQh = Q[i, 0]
+                    eta = Q[i, 1] if Q.shape[1] == 2 else torch.zeros_like(e2qQh)
                     if I_q < 1:
                         rows.append(torch.zeros(3, dtype=torch.float64))
                     else:
                         rows.append(e2qQh / (4 * I_q * (2 * I_q - 1))
-                                    * torch.tensor([-1 + eta, -1 - eta, 2], dtype=torch.float64))
+                                    * torch.stack([-1 + eta, -1 - eta, 2 * torch.ones_like(eta)]))
                 Q = torch.stack(rows)
             self.Q = Q
 

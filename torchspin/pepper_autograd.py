@@ -327,8 +327,13 @@ def _interp_l3_t(y: torch.Tensor, N_f: int) -> torch.Tensor:
     if n > 2:
         d0, d1 = d[:, :n - 2], d[:, 1:n - 1]
         same = (torch.sign(d0.detach()) * torch.sign(d1.detach())) > 0
+        # Replace the unselected differences (which may be NaN for slots missing
+        # at some orientations) before any arithmetic: torch.where's backward
+        # multiplies the unselected branch's local gradient by 0, and 0·NaN = NaN.
+        one = torch.ones_like(d0)
+        d0, d1 = torch.where(same, d0, one), torch.where(same, d1, one)
         dmax = torch.maximum(d0.abs(), d1.abs()); dmin = torch.minimum(d0.abs(), d1.abs())
-        Tin = torch.where(same, 2 * dmin * dmax / torch.where(same, d0 + d1, torch.ones_like(d0)), torch.zeros_like(d0))
+        Tin = torch.where(same, 2 * dmin * dmax / (d0 + d1), torch.zeros_like(d0))
         T = torch.cat([torch.zeros_like(y[:, :1]), Tin, torch.zeros_like(y[:, :1])], dim=1)
     C = torch.stack([y[:, :-1], y[:, 1:], T[:, :-1], T[:, 1:]], dim=1)      # (S, 4, n-1)
     yii = torch.einsum('fk,kl,slm->sfm', X, H, C)                            # (S, factor, n-1)
@@ -475,15 +480,38 @@ def _check_supported(sys: SpinSystem, exp: Experiment, opt: Options) -> None:
         raise ValueError('Harmonic must be 0, 1 or 2.')
 
 
-def pepper_autograd(sys: SpinSystem, exp: Experiment, opt: Optional[Options] = None) -> tuple[torch.Tensor, torch.Tensor]:
+def pepper_autograd(sys_or_list, exp: Experiment, opt: Optional[Options] = None) -> tuple[torch.Tensor, torch.Tensor]:
     """Rigid-limit powder CW EPR spectrum, identical to :func:`torchspin.pepper.pepper`
     (matrix method, no strain) and differentiable with respect to every spin-system
     tensor that ``requires_grad`` (``g``, ``A``, ``D``, ``lw``/``lwpp`` ...).
 
+    Accepts a single :class:`SpinSystem` or a list of components. As in
+    ``pepper``, every component is expanded into its isotopologues (natural
+    abundance for element names such as ``'Zr'``, or ``Sys.Abund``) and the
+    spectra are summed with weight ``Sys.weight`` × abundance. The abundances
+    are constants, so the sum stays on the graph. :func:`torchspin.pepper.pepper`
+    calls this function itself when any input requires grad.
+
     Returns ``(B, spec)``: field axis (mT) and spectrum on the autograd graph.
     """
+    from torchspin.isotopologues import expand_components
     opt = opt if opt is not None else Options()
-    _check_supported(sys, exp, opt)
+    if str(getattr(opt, 'separate', '') or ''):
+        raise NotImplementedError("pepper_autograd: Options.separate is not supported.")
+    components = expand_components(sys_or_list, getattr(opt, 'IsoCutoff', 1e-4))
+    for c in components:
+        _check_supported(c, exp, opt)
+    x, total = None, None
+    for c in components:
+        x, spec = _pepper_autograd_single(c, exp, opt)
+        w = getattr(c, 'weight', 1.0)
+        spec = spec * (w if torch.is_tensor(w) else float(w))
+        total = spec if total is None else total + spec
+    return x, total
+
+
+def _pepper_autograd_single(sys: SpinSystem, exp: Experiment, opt: Options) -> tuple[torch.Tensor, torch.Tensor]:
+    """pepper_autograd for one isotopologue (no weight applied)."""
     device = torch.device(opt.device)
     nPoints = int(exp.nPoints)
     B_lo, B_hi = float(exp.Range[0]), float(exp.Range[1])

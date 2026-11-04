@@ -6,6 +6,79 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-11-04
+
+Fixes for GitHub issues #5–#9. Each one was a case where torchspin returned a
+plausible result without any warning that it was wrong. Two more defects found
+while verifying them are fixed too: dict-style esfit ignored all but the last
+element of each array field, and pepper_autograd returned NaN gradients for
+an exactly isotropic A.
+
+### Changed — behavior differs from 0.6.0
+
+- **esfit `autoscale='lsq'` with a negative unconstrained scale** (#6). The
+  scale is now the sign-constrained least-squares optimum: 0, with the
+  baseline refitted alone. EasySpin, and torchspin up to 0.6.0, took
+  `abs(scale)` but kept the baseline solved for the opposite sign. That
+  objective is not a least-squares fit, so optimizers walked away from the
+  true minimum (an inversion-recovery fit with `exp(-t/T)` ran to its bound).
+  esfit warns when the final fit has a negative scale. The old behavior is
+  `FitOptions(lsq_negative_scale='abs')`.
+- **esfit uncertainties** (#5). A parameter that has no effect on the
+  residuals at the finite-difference step now gets `pstd = nan` and a
+  warning, not `pstd = 0`, which read as a perfectly determined parameter.
+- **pepper with inputs that require grad** (#7) now returns a spectrum on the
+  autograd graph by dispatching to `pepper_autograd`. It used to return a
+  detached spectrum without any warning. Unsupported configurations raise an
+  error that names `pepper_autograd`.
+- **saffron with a predefined `Sequence` and nonzero `Exp.tp`** (#9) now raises,
+  as `saffron.m` 351 does, in every simulation mode. 0.6.0 meant to do this,
+  but the check sat in the fast path, and nonzero `tp` routed to the
+  real-pulse engine first. Its predefined templates use fixed 16/32 ns pulses
+  and never read `Exp.tp`, so the requested pulse lengths were silently
+  ignored.
+
+### Fixed
+
+- **Dict-style esfit fitted only the last element of each array field.**
+  `TorchSpinParameterHandler.to_dict` rebuilt each element from the original
+  `p0`, so varying `g[0,0]`, `A[0,0]` or `lw[0]` never reached the simulator.
+  Present since 0.3.0.
+- **esfit was blind to line positions with garlic's default
+  `AccumMethod='binning'`** (#5). The binned spectrum is piecewise-constant in
+  g and A, so every finite-difference Jacobian was zero for them and levmar
+  never moved A. Dict-style esfit now runs garlic with `'linear'` when
+  `AccumMethod` is unset. levmar, trf and the uncertainty estimate warn when
+  a Jacobian column is dead, which also covers custom models that wrap garlic.
+- **esfit baselines with `autoscale='none'` and `'maxabs'`.** `'none'` fitted
+  the baseline jointly with a free scale and then applied it at scale 1.
+  `'maxabs'` built `scale * x**sum(arange)` and not a polynomial. Both now fit
+  the polynomial to the data minus the scaled model.
+- **pepper_autograd and natural-abundance nuclei** (#7). `Nucs=['Zr']` failed
+  in `nucdata`. Components are now expanded into isotopologues and summed with
+  `Sys.weight` × abundance, as in pepper. `Sys.weight` was previously ignored,
+  and lists of components are accepted.
+- **Quadrupole shorthand `[e2qQ/h, eta]` dropped the graph** (#7). It was
+  converted with `float()`, so dL/dQ was silently zero in a fit. The principal
+  values are now built with torch ops.
+- **NaN gradients in pepper_autograd's axial-grid interpolation.** When a
+  transition slot was missing at some orientations (e.g. exactly isotropic A),
+  `torch.where`'s backward computed 0·NaN. The forward output is unchanged.
+- The preselection cutoff no longer triggers PyTorch's "converting a tensor
+  with requires_grad=True to a scalar" warning.
+
+### Added
+
+- spidyan warnings (#8) for a user-set `IntTimeStep` coarser than Nyquist/2
+  (a π pulse is ~3 % off there and 40 % at Nyquist), and for `SimFreq` less
+  than 5 nutation frequencies below the lowest pulse carrier.
+- `docs/pitfalls.md` (#8): perturbation errors at large A/ν (measured on ⁹¹Zr,
+  A/ν = 0.08), binned garlic spectra in fits, the lsq sign, satellite-assignment
+  minima, Q fits started at zero, and the pulse-simulation limits.
+- `examples/fitting/large_hyperfine_fit.py`: a staged fit of a synthetic
+  natural-abundance Zr spectrum.
+- `torchspin.autograd.inputs_require_grad`.
+
 ### Fixed — a flaky tolerance in the real-pulse frame-rotation test
 
 `test_frame_tilts_match_an_equivalent_sample_tilt` asserted that a tensor tilt

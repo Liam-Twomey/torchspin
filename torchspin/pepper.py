@@ -622,7 +622,7 @@ def _preselect_pairs(H0, mux, muy, muz, sys, exp, opt, B_center, freq_sweep=Fals
             el_idx = torch.arange(n) // n_nuc
             keep &= el_idx.unsqueeze(1) != el_idx.unsqueeze(0)   # drop pure nuclear transitions
     rates = max_rate[keep]
-    cutoff = thr * float(rates.max()) if rates.numel() else 0.0
+    cutoff = thr * float(rates.detach().max()) if rates.numel() else 0.0
     sel = keep & (max_rate > cutoff)
     ii, jj = torch.nonzero(sel, as_tuple=True)
     return [(int(a), int(b)) for a, b in zip(ii.tolist(), jj.tolist())]
@@ -1032,8 +1032,15 @@ def pepper(sys_or_list, exp: Experiment, opt: Optional[Options] = None):
 
     Notes
     -----
-    * Only the matrix-diagonalization method is implemented (set via
-      ``Options.Method='matrix'``).
+    * ``Options.Method``: ``'matrix'`` (default, exact diagonalization),
+      ``'perturb'``/``'perturb1'``/``'perturb2'`` or ``'hybrid'``. Second-order
+      perturbation theory is inaccurate when A is a sizable fraction of the
+      microwave frequency. For isotropic 91Zr with A = 780 MHz at 9.65 GHz
+      (A/nu = 0.08), ``'perturb'`` differs from ``'matrix'`` by 0.18 relative
+      L2. Use ``'matrix'`` there.
+    * If any SpinSystem/Experiment tensor requires grad, pepper runs
+      :func:`torchspin.pepper_autograd.pepper_autograd` and returns a spectrum
+      on the autograd graph.
     * Powder averaging uses the SOPHE grid (Wang & Hanson, 1995).
     * Lineshape convolution is FFT-based.
     * Strain broadening adds per-transition widths in quadrature with
@@ -1056,6 +1063,19 @@ def pepper(sys_or_list, exp: Experiment, opt: Optional[Options] = None):
             f"solver is second order: use 'perturb' or 'perturb2' for second order, "
             f"'perturb1' for first order, or 'hybrid'/'matrix'."
         )
+    # Inputs on the autograd graph: run the differentiable forward path, as
+    # garlic does, instead of returning a silently detached spectrum.
+    from torchspin.autograd import inputs_require_grad
+    if inputs_require_grad(sys_or_list, exp):
+        from torchspin.pepper_autograd import pepper_autograd
+        try:
+            return pepper_autograd(sys_or_list, exp, opt_)
+        except NotImplementedError as e:
+            raise NotImplementedError(
+                f"pepper: some SpinSystem/Experiment inputs require grad, so pepper runs "
+                f"its differentiable path (torchspin.pepper_autograd.pepper_autograd), "
+                f"which does not support this configuration: {e} Detach the inputs "
+                f"(tensor.detach()) for a non-differentiable spectrum.") from e
     # Sets of equivalent nuclei multiply the Hilbert space, so the exact solver
     # cannot collapse them (EasySpin pepper rejects Sys.n > 1 outright).  The
     # perturbation and hybrid solvers treat nuclei one at a time and combine

@@ -299,15 +299,17 @@ class TestSimpleFits:
     
     def test_fit_with_baseline_correction(self):
         """Test fitting with baseline correction."""
-        # Generate data with linear baseline
+        # Generate data with linear baseline. The model must not lie in the
+        # span of the baseline polynomial, or its amplitude is unidentifiable
+        # (an earlier version used p[0]*x, which a linear baseline absorbs).
         x = np.linspace(0, 10, 100)
         m_true = 2.0
-        baseline_true = 0.5 + 0.1 * x  # Linear baseline  
-        y_data = m_true * x + baseline_true
-        
+        baseline_true = 0.5 + 0.1 * x  # Linear baseline
+        y_data = m_true * np.sin(x) + baseline_true
+
         # Define model (without baseline)
         def model(p):
-            return p[0] * x
+            return p[0] * np.sin(x)
         
         # Fit with linear baseline and no separate scaling
         result = esfit(
@@ -1563,3 +1565,160 @@ def test_eval_population_main_module_function_goes_by_value():
     nb_style.__qualname__ = 'nb_style'
     X = np.random.default_rng(2).random((4, 3))
     assert np.allclose(_eval_population(nb_style, X, 2, 'processes'), X.sum(axis=1))
+
+
+class TestAutoscaleSignAndBaseline:
+    """GitHub #6: lsq autoscale with a negative unconstrained scale, and the
+    baselines of autoscale='none'/'maxabs'."""
+
+    def _design(self, n, order):
+        x = np.linspace(0, 1, n)
+        return np.column_stack([x**k for k in range(order + 1)])
+
+    def test_negative_scale_clips_to_zero_and_refits_baseline(self):
+        from torchspin.esfit import _fit_scale_baseline_lsq
+        t = np.linspace(0, 10, 200)
+        data = 5.0 - 3.0 * np.exp(-t / 2.0)
+        sim = np.exp(-t / 2.0)                        # wrong sign
+        scale, baseline, neg = _fit_scale_baseline_lsq(sim, data, 1, return_negative=True)
+        assert neg and scale == 0.0
+        P = self._design(t.size, 1)
+        ref = P @ np.linalg.lstsq(P, data, rcond=None)[0]
+        np.testing.assert_allclose(baseline, ref, rtol=0, atol=1e-12)
+
+    def test_constrained_is_never_worse_than_abs(self):
+        from torchspin.esfit import _fit_scale_baseline_lsq
+        rng = np.random.default_rng(1)
+        for order in (-1, 0, 2):
+            for _ in range(20):
+                sim, data = rng.standard_normal(50), rng.standard_normal(50)
+                s_c, b_c = _fit_scale_baseline_lsq(sim, data, order)
+                s_a, b_a = _fit_scale_baseline_lsq(sim, data, order, negative_scale='abs')
+                assert s_c >= 0 and s_a >= 0
+                assert (np.linalg.norm(s_c * sim + b_c - data)
+                        <= np.linalg.norm(s_a * sim + b_a - data) + 1e-12)
+
+    def test_positive_scale_unchanged(self):
+        from torchspin.esfit import _fit_scale_baseline_lsq
+        x = np.linspace(0, 1, 100)
+        sim = np.sin(8 * x)
+        data = 2.0 * sim + 0.3 + 0.1 * x
+        for mode in ('clip', 'abs'):
+            scale, baseline = _fit_scale_baseline_lsq(sim, data, 1, negative_scale=mode)
+            assert abs(scale - 2.0) < 1e-10
+            np.testing.assert_allclose(baseline, 0.3 + 0.1 * x, atol=1e-10)
+
+    def test_inversion_recovery_wrong_sign_warns(self):
+        """The reproducer from #6: with the wrong model sign the fit no longer
+        minimizes a mirrored objective, and esfit warns."""
+        t = np.linspace(0, 10, 400)
+        y = 5.0 - 3.0 * np.exp(-t / 2.0) + 0.01 * np.random.default_rng(0).standard_normal(t.size)
+        opts = FitOptions(method='levmar', baseline=0, target='fcn', verbosity=0,
+                          compute_uncertainties=False)
+        with pytest.warns(UserWarning, match="negative scale"):
+            r = esfit(y, lambda p: np.exp(-t / p[0]), np.array([2.2]),
+                      lb=np.array([0.1]), ub=np.array([20.0]), options=opts)
+        # scale 0 + constant baseline: the RMSD is the data's own spread
+        assert r.scale == 0.0
+        assert abs(r.rmsd - np.std(y)) < 1e-9
+        r = esfit(y, lambda p: -np.exp(-t / p[0]), np.array([2.2]),
+                  lb=np.array([0.1]), ub=np.array([20.0]), options=opts)
+        assert abs(r.pfit[0] - 2.0) < 0.02
+
+    def test_autoscale_none_baseline_fits_data_minus_sim(self):
+        from torchspin.esfit import compute_residuals, ModelWrapper, ParameterHandler
+        x = np.linspace(0, 1, 80)
+        data = np.sin(6 * x) + 0.4 - 0.2 * x
+        ph = ParameterHandler(np.array([1.0]), vary=np.array([0.5]))
+        mw = ModelWrapper(lambda p: p[0] * np.sin(6 * x), np.array([1.0]), x.size)
+        for autoscale in ('none', 'maxabs'):
+            opts = FitOptions(autoscale=autoscale, baseline=1, target='fcn')
+            _, rmsd, info = compute_residuals(np.array([1.0]), data, mw, ph, opts)
+            resid = data - info['scale'] * info['sim']
+            P = self._design(x.size, 1)
+            ref = P @ np.linalg.lstsq(P, resid, rcond=None)[0]
+            np.testing.assert_allclose(info['baseline'], ref, atol=1e-12)
+        # with autoscale='none' the model plus a linear baseline is exact
+        _, rmsd, _ = compute_residuals(np.array([1.0]), data, mw, ph,
+                                       FitOptions(autoscale='none', baseline=1, target='fcn'))
+        assert rmsd < 1e-12
+
+
+class TestDictStyleArrayFields:
+    """Every element of an array field must reach the model, not only the last."""
+
+    def test_to_dict_applies_every_element(self):
+        from torchspin.esfit import ParameterHandler
+        exp = Experiment(mwFreq=9.65, Range=[300.0, 440.0], nPoints=64)
+        sys0 = SpinSystem(S=[0.5], g=[[2.0, 2.0, 2.0]], Nucs=['1H'], A=[[10.0, 10.0, 10.0]],
+                          lw=[1.0, 2.0])
+        ph = ParameterHandler({'Sys': sys0, 'Exp': exp},
+                              vary={'Sys': {'g': [[0.1, 0.1, 0.0]], 'A': [[5.0, 0, 0]],
+                                            'lw': [0.5, 0.5]}})
+        p = ph.p0_active + np.array([0.01, 0.02, 1.0, 0.1, 0.2])
+        d = ph._handler.to_dict(p)
+        np.testing.assert_allclose(d['Sys'].g.numpy(), [[2.01, 2.02, 2.0]])
+        np.testing.assert_allclose(d['Sys'].A.numpy(), [[11.0, 10.0, 10.0]])
+        np.testing.assert_allclose(d['Sys'].lw, [1.1, 2.2])
+        # p0 itself is untouched
+        np.testing.assert_allclose(sys0.g.numpy(), [[2.0, 2.0, 2.0]])
+        assert sys0.lw == [1.0, 2.0]
+
+
+class TestBinnedGarlicFiniteDifferences:
+    """GitHub #5: garlic's nearest-bin accumulation is piecewise-constant in
+    the line positions, so finite-difference Jacobians are zero for g and A."""
+
+    exp = Experiment(mwFreq=9.65, Range=[300.0, 440.0], nPoints=400, Harmonic=1)
+
+    def _sim(self, p, accum):
+        from torchspin import garlic
+        sys = SpinSystem(S=[0.5], g=p[0], Nucs=['91Zr'], A=p[1], lw=[abs(p[2]), abs(p[3])])
+        opt = Options(AccumMethod=accum) if accum else None
+        return np.asarray(garlic(sys, self.exp, opt)[1], float)
+
+    def _data(self):
+        clean = self._sim([1.885, 780.0, 1.0, 2.0], 'explicit')
+        rng = np.random.default_rng(0)
+        return clean + 0.01 * np.ptp(clean) * rng.standard_normal(clean.size)
+
+    def test_dead_parameter_warns_and_reports_nan_sigma(self):
+        data = self._data()
+        opts = FitOptions(method='levmar', max_iter=50, verbosity=0)
+        with pytest.warns(UserWarning, match="do not change with parameter"):
+            r = esfit(data, lambda p: self._sim(p, 'binning'), np.array([1.8853, 785.0, 1.2, 1.8]),
+                      vary=np.array([0.005, 30.0, 0.8, 0.8]), options=opts)
+        assert np.isnan(r.pstd[1])                      # A: undetermined, not sigma = 0
+        assert np.all(np.isfinite(r.pstd[2:]))          # line widths still estimated
+
+    def test_smooth_model_has_no_warning(self):
+        import warnings as _w
+        data = self._data()
+        with _w.catch_warnings():
+            _w.simplefilter('error', UserWarning)
+            r = esfit(data, lambda p: self._sim(p, 'linear'), np.array([1.8853, 785.0, 1.2, 1.8]),
+                      vary=np.array([0.005, 30.0, 0.8, 0.8]),
+                      options=FitOptions(method='levmar', max_iter=100, verbosity=0))
+        assert abs(r.pfit[1] - 780.0) < 2.0
+        assert np.all(np.isfinite(r.pstd)) and np.all(r.pstd > 0)
+
+    def test_dict_style_garlic_switches_default_binning_to_linear(self):
+        from torchspin import garlic
+        from torchspin.esfit import ModelWrapper
+        data = self._data()
+        sys0 = SpinSystem(S=[0.5], g=1.8853, Nucs=['91Zr'], A=785.0, lw=[1.2, 1.8])
+        vary = {'Sys': {'g': [[0.015, 0, 0]], 'A': [[90.0, 0, 0]], 'lw': [0.8, 0.8]}}
+        r = esfit(data, garlic, {'Sys': sys0, 'Exp': self.exp}, vary=vary,
+                  options=FitOptions(method='levmar', max_iter=100, verbosity=0))
+        a_iso = (r.pfit[1] + 2 * 785.0) / 3
+        assert abs(a_iso - 780.0) < 2.0
+        assert np.all(np.isfinite(r.pstd)) and np.all(r.pstd > 0)
+        # a user-chosen AccumMethod is respected
+        mw = ModelWrapper(garlic, {'Sys': sys0}, data.size)
+        assert mw._fd_friendly_options(Options(AccumMethod='binning'), sys0, self.exp).AccumMethod == 'binning'
+        user_opt = Options()
+        assert mw._fd_friendly_options(user_opt, sys0, self.exp).AccumMethod == 'linear'
+        assert user_opt.AccumMethod is None              # not mutated
+        # fast motion defaults to 'explicit' and is left alone
+        fm = SpinSystem(S=[0.5], g=2.0, Nucs=['14N'], A=40.0, lw=[0.1, 0.1], tcorr=1e-10)
+        assert mw._fd_friendly_options(None, fm, self.exp) is None

@@ -484,6 +484,14 @@ def test_fitting_globallocal():
     assert result is not None
 
 
+def test_fitting_large_hyperfine_fit():
+    """The staged recipe recovers A(91Zr) where a one-shot local fit does not."""
+    mod = _import("fitting", "large_hyperfine_fit")
+    _, _, _, _, _, r3 = mod.run()
+    assert abs(r3.pfit[1] - 780.0) < 2.0
+    assert abs(r3.pfit[0] - 1.885) < 1e-4
+
+
 @pytest.mark.slow
 def test_fitting_fit_multifreq():
     mod = _import("fitting", "fit_multifreq")

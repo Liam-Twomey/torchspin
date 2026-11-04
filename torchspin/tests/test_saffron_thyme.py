@@ -126,6 +126,23 @@ class TestEngineSelection:
         with pytest.raises(ValueError, match="predefined sequences"):
             saffron(_simple_sys(), exp, SaffronOptions(SimulationMode='fast'))
 
+    @pytest.mark.parametrize("mode", [None, 'thyme'])
+    def test_predefined_with_real_pulses_rejected_in_every_mode(self, mode):
+        """GitHub #9: with Exp.tp the engine used to be inferred as thyme, whose
+        predefined templates use fixed 16/32 ns pulses, so Exp.tp was silently
+        ignored. EasySpin raises in this case (saffron.m:351), and so do we."""
+        exp = PulseExperiment(Sequence='2pESEEM', Field=340.0, dt=0.02,
+                              tau=0.2, nPoints=[32], tp=[0.001, 0.002])
+        with pytest.raises(ValueError, match="predefined sequences.*real"):
+            saffron(_simple_sys(), exp, SaffronOptions(SimulationMode=mode))
+
+    def test_predefined_with_zero_tp_runs_fast(self):
+        """All-zero Exp.tp means ideal pulses, which EasySpin accepts."""
+        exp = PulseExperiment(Sequence='2pESEEM', Field=340.0, dt=0.02,
+                              tau=0.2, nPoints=[32], tp=[0.0, 0.0])
+        y = saffron(_simple_sys(), exp, SaffronOptions(GridSize=7))[1]
+        assert np.all(np.isfinite(np.asarray(y)))
+
     def test_det_fields_rejected_by_fast(self):
         """Exp.DetSequence / Exp.DetIntegrate do not apply to the fast path."""
         exp = PulseExperiment(Sequence='2pESEEM', Field=340.0, dt=0.02,

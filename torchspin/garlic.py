@@ -18,6 +18,19 @@ expansion of it in the hyperfine coupling (``'perturb1'``–``'perturb5'``,
 ``'perturb'`` = 5th order, Newton–Raphson root finding).  The shift lists of
 all groups are then combined additively.
 
+Perturbation theory converges slowly when the hyperfine coupling is a sizable
+fraction of the microwave frequency. For isotropic 91Zr with A = 780 MHz at
+9.65 GHz (A/nu = 0.08), the relative L2 error against ``'exact'`` is 0.82
+(perturb2), 0.11 (perturb3), 0.018 (perturb4) and 0.0032 (perturb5). Use
+``'exact'`` for large A/nu. ``'exact'`` is also the default.
+
+The default ``AccumMethod`` for the isotropic limit is ``'binning'`` (nearest
+field bin, as in EasySpin). It is piecewise-constant in the line positions,
+so it has no finite-difference derivative with respect to g or A. Use
+``'linear'`` (two-bin split) or ``'explicit'`` in a model that is fitted with
+a gradient-based optimizer. On the autograd graph, garlic switches to
+``'linear'`` itself.
+
 Usage:
     B, spec = garlic(sys, exp)
     B, spec = garlic(sys, exp, opt)
@@ -43,7 +56,7 @@ Parameters:
 
     opt : Options, optional
         Method : 'exact' (default) | 'perturb' | 'perturb1'..'perturb5'
-        AccumMethod : None (auto) | 'binning' | 'explicit'
+        AccumMethod : None (auto) | 'binning' | 'linear' | 'explicit'
         Accuracy, MaxIterations : solver controls
         Verbosity : 0 (silent), 1 (normal)
 

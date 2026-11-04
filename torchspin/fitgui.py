@@ -174,7 +174,9 @@ class FitSession:
         """Model output at ``p``, scaled to the data like esfit (lsq amplitude + baseline)."""
         sim = np.asarray(self.model(np.asarray(p, dtype=float)), dtype=float).ravel()
         if self.options.autoscale == 'lsq':
-            scale, baseline = _fit_scale_baseline_lsq(sim, self.data, self.options.baseline)
+            scale, baseline = _fit_scale_baseline_lsq(
+                sim, self.data, self.options.baseline,
+                negative_scale=self.options.lsq_negative_scale)
             return float(scale) * sim + np.asarray(baseline, dtype=float)
         return sim
 

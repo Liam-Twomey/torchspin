@@ -38,6 +38,8 @@ deterministically for a given seed) and the differentiable losses
 
 - [README](../README.md) — installation, quick start, feature list, validation status.
 - [KNOWN_LIMITATIONS](../KNOWN_LIMITATIONS.md) — what is and is not ported, per simulator, with the evidence.
+- [Pitfalls](pitfalls.md) — valid settings that quietly degrade a result: perturbation theory at large A/ν,
+  binned garlic spectra in fits, the lsq autoscale sign, satellite-assignment minima, spidyan step and frame limits.
 - [CHANGELOG](../CHANGELOG.md) — what changed when, including the parity and performance rounds.
 - [Benchmark report](../benchmarks/results/BENCHMARK_REPORT.md) — MATLAB/EasySpin vs torchspin on nine
   workloads, before and after the 2026-09 optimizations, with profiles and the measurement procedure.
@@ -57,5 +59,5 @@ deterministically for a given seed) and the differentiable losses
 
 ## Tests
 
-`python -m pytest` runs the full suite (2659 tests, including the MATLAB-validation modules that
+`python -m pytest` runs the full suite (about 2800 tests, including the MATLAB-validation modules that
 compare against the stored references in `tests/data`; no MATLAB installation needed).

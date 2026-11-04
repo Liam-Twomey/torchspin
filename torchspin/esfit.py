@@ -6,6 +6,7 @@ optimizing simulation parameters to minimize residuals.
 """
 
 import time
+import warnings
 
 import numpy as np
 import torch
@@ -41,7 +42,18 @@ class FitOptions:
     autoscale : str
         Scaling method for fit. Options: 'lsq' (least squares),
         'maxabs' (maximum absolute value), 'none' (no scaling).
-        Default: 'lsq'
+        Default: 'lsq'. The 'lsq' scale is constrained to be non-negative,
+        as in EasySpin, so the model must carry the sign of the signal: fit
+        an inversion-recovery curve with ``-exp(-t/T)``, not ``exp(-t/T)``.
+    lsq_negative_scale : str
+        What 'lsq' autoscaling does when the unconstrained scale comes out
+        negative (model anti-correlated with the data). 'clip' (default)
+        returns the constrained least-squares optimum: scale 0 with the
+        baseline refitted alone. 'abs' reproduces EasySpin's
+        ``coeffs(1) = abs(coeffs(1))``, which mirrors the model but keeps the
+        baseline solved for the opposite sign, so the objective is not a
+        least-squares fit of anything. esfit warns if the final fit has a
+        negative unconstrained scale.
     baseline : int
         Baseline correction polynomial order. -1 for no baseline,
         0 for constant, 1 for linear, 2 for quadratic, 3 for cubic.
@@ -109,6 +121,7 @@ class FitOptions:
     """
     method: str = 'simplex'
     autoscale: str = 'lsq'
+    lsq_negative_scale: str = 'clip'
     baseline: int = -1
     target: str = 'auto'
     max_iter: int = 2000
@@ -814,16 +827,38 @@ class ModelWrapper:
         return output
 
 
+def _baseline_design(n: int, baseline_order: int) -> np.ndarray:
+    """Polynomial baseline columns ``[1, x, x², ...]`` on ``x = linspace(0, 1, n)``."""
+    x = np.linspace(0, 1, n)
+    return np.column_stack([x**k for k in range(baseline_order + 1)])
+
+
+def _fit_polynomial_baseline(resid: np.ndarray, baseline_order: int) -> np.ndarray:
+    """Least-squares polynomial baseline of order ``baseline_order`` fitted to
+    ``resid`` (zero vector for ``baseline_order < 0``)."""
+    n = len(resid)
+    if baseline_order < 0:
+        return np.zeros(n)
+    P = _baseline_design(n, baseline_order)
+    coeffs, _, _, _ = np.linalg.lstsq(P, resid, rcond=None)
+    return P @ coeffs
+
+
 def _fit_scale_baseline_lsq(
     sim: np.ndarray,
     data: np.ndarray,
-    baseline_order: int
-) -> tuple[float, np.ndarray]:
+    baseline_order: int,
+    negative_scale: str = 'clip',
+    return_negative: bool = False,
+):
     """
-    Fit scale and baseline simultaneously via least squares.
-    
-    Solves: [sim, 1, x, x², ...] * coeffs = data
-    
+    Fit a non-negative scale and a polynomial baseline by least squares.
+
+    Solves ``min ||scale·sim + P·b − data||`` subject to ``scale ≥ 0``, where
+    ``P = [1, x, x², ...]``. The scale is forced non-negative, as in EasySpin,
+    because a free sign lets the optimizer "fit" by mirroring the model, which
+    creates spurious minima on derivative spectra.
+
     Parameters
     ----------
     sim : np.ndarray
@@ -832,36 +867,56 @@ def _fit_scale_baseline_lsq(
         Experimental data
     baseline_order : int
         Polynomial order for baseline (-1 for none)
-    
+    negative_scale : {'clip', 'abs'}
+        What to do when the unconstrained solve gives a negative scale.
+        ``'clip'`` (default) returns the constrained optimum: ``scale = 0``
+        with the baseline refitted alone. ``'abs'`` is EasySpin's
+        ``coeffs(1) = abs(coeffs(1))``: it mirrors the scale but keeps the
+        baseline solved for the opposite sign, which is not a least-squares
+        fit of anything.
+    return_negative : bool
+        Also return whether the unconstrained scale was negative.
+
     Returns
     -------
     scale : float
-        Optimal scale factor
+        Optimal non-negative scale factor
     baseline : np.ndarray
         Baseline vector
+    negative : bool
+        Only with ``return_negative=True``.
     """
+    if negative_scale not in ('clip', 'abs'):
+        raise ValueError(f"lsq_negative_scale must be 'clip' or 'abs', got {negative_scale!r}")
     n = len(sim)
 
     if baseline_order < 0:
-        # No baseline, just scale. Force positive to match EasySpin
-        # (esfit.m line 1049: coeffs(1) = abs(coeffs(1))). A negative
-        # scale lets the optimizer "fit" by sign-flipping the model,
-        # which creates spurious local minima on derivative spectra.
-        scale = (sim @ data) / (sim @ sim + 1e-12)
-        return abs(scale), np.zeros(n)
+        scale = float((sim @ data) / (sim @ sim + 1e-12))
+        baseline = np.zeros(n)
+        negative = scale < 0
+        if negative:
+            scale = abs(scale) if negative_scale == 'abs' else 0.0
+    else:
+        P = _baseline_design(n, baseline_order)
+        D = np.column_stack([sim, P])
+        coeffs, _, _, _ = np.linalg.lstsq(D, data, rcond=None)
+        scale = float(coeffs[0])
+        negative = scale < 0
+        if not negative:
+            baseline = P @ coeffs[1:]
+        elif negative_scale == 'abs':
+            # EasySpin parity (esfit.m: coeffs(1) = abs(coeffs(1)))
+            scale = abs(scale)
+            baseline = P @ coeffs[1:]
+        else:
+            # One sign-constrained coefficient in a convex problem: the
+            # constrained optimum sits on the boundary scale = 0, with the
+            # baseline refitted on its own.
+            scale = 0.0
+            baseline = _fit_polynomial_baseline(data, baseline_order)
 
-    # Build design matrix
-    x = np.linspace(0, 1, n)
-    D = [sim]
-    for k in range(baseline_order + 1):
-        D.append(x**k)
-    D = np.column_stack(D)
-
-    # Least squares
-    coeffs, _, _, _ = np.linalg.lstsq(D, data, rcond=None)
-    scale = abs(coeffs[0])  # match EasySpin: enforce positive scale
-    baseline = D[:, 1:] @ coeffs[1:]
-
+    if return_negative:
+        return scale, baseline, negative
     return scale, baseline
 
 
@@ -913,27 +968,20 @@ def compute_residuals(
     sim = model_wrapper(pvec_active, param_handler)
     
     # 2. Apply autoscaling
+    negative_scale = False
     if options.autoscale == 'lsq':
-        scale, baseline = _fit_scale_baseline_lsq(sim, data, options.baseline)
+        scale, baseline, negative_scale = _fit_scale_baseline_lsq(
+            sim, data, options.baseline,
+            negative_scale=options.lsq_negative_scale, return_negative=True)
         fit = scale * sim + baseline
     elif options.autoscale == 'maxabs':
         scale = np.max(np.abs(data)) / (np.max(np.abs(sim)) + 1e-12)
-        if options.baseline >= 0:
-            # Fit baseline on scaled residuals
-            scale_baseline, _ = _fit_scale_baseline_lsq(
-                np.ones_like(sim), data - scale*sim, options.baseline
-            )
-            baseline = scale_baseline * np.linspace(0, 1, len(sim))**np.arange(options.baseline+1).sum()
-        else:
-            baseline = np.zeros_like(sim)
+        # polynomial baseline fitted to what the scaled model leaves over
+        baseline = _fit_polynomial_baseline(data - scale * sim, options.baseline)
         fit = scale * sim + baseline
     else:  # 'none'
         scale = 1.0
-        if options.baseline >= 0:
-            # Fit baseline only (no scaling)
-            _, baseline = _fit_scale_baseline_lsq(sim, data, options.baseline)
-        else:
-            baseline = np.zeros_like(sim)
+        baseline = _fit_polynomial_baseline(data - sim, options.baseline)
         fit = sim + baseline
     
     # 3. Compute residuals
@@ -950,7 +998,8 @@ def compute_residuals(
         'fit': fit,
         'scale': scale,
         'baseline': baseline,
-        'residuals_raw': residuals_raw
+        'residuals_raw': residuals_raw,
+        'negative_scale': negative_scale,
     }
     
     return residuals, rmsd, info
@@ -2377,6 +2426,13 @@ def esfit(
     residuals, rmsd, info = compute_residuals(
         pfit_vec, data, model_wrapper, param_handler, options
     )
+    if info.get('negative_scale'):
+        warnings.warn(
+            "esfit: lsq autoscale found a negative scale at the fitted parameters "
+            "(the model is anti-correlated with the data), so the scale was "
+            f"{'clipped to 0' if options.lsq_negative_scale == 'clip' else 'replaced by its absolute value'}. "
+            "Check the sign of the model: with autoscale='lsq' it must carry the "
+            "sign of the signal.", UserWarning, stacklevel=2)
     
     if options.verbosity > 0:
         print(f"\nFinal RMSD: {rmsd:.6e}")

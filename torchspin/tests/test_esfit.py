@@ -299,15 +299,17 @@ class TestSimpleFits:
     
     def test_fit_with_baseline_correction(self):
         """Test fitting with baseline correction."""
-        # Generate data with linear baseline
+        # Generate data with linear baseline. The model must not lie in the
+        # span of the baseline polynomial, or its amplitude is unidentifiable
+        # (an earlier version used p[0]*x, which a linear baseline absorbs).
         x = np.linspace(0, 10, 100)
         m_true = 2.0
-        baseline_true = 0.5 + 0.1 * x  # Linear baseline  
-        y_data = m_true * x + baseline_true
-        
+        baseline_true = 0.5 + 0.1 * x  # Linear baseline
+        y_data = m_true * np.sin(x) + baseline_true
+
         # Define model (without baseline)
         def model(p):
-            return p[0] * x
+            return p[0] * np.sin(x)
         
         # Fit with linear baseline and no separate scaling
         result = esfit(
@@ -1563,3 +1565,80 @@ def test_eval_population_main_module_function_goes_by_value():
     nb_style.__qualname__ = 'nb_style'
     X = np.random.default_rng(2).random((4, 3))
     assert np.allclose(_eval_population(nb_style, X, 2, 'processes'), X.sum(axis=1))
+
+
+class TestAutoscaleSignAndBaseline:
+    """GitHub #6: lsq autoscale with a negative unconstrained scale, and the
+    baselines of autoscale='none'/'maxabs'."""
+
+    def _design(self, n, order):
+        x = np.linspace(0, 1, n)
+        return np.column_stack([x**k for k in range(order + 1)])
+
+    def test_negative_scale_clips_to_zero_and_refits_baseline(self):
+        from torchspin.esfit import _fit_scale_baseline_lsq
+        t = np.linspace(0, 10, 200)
+        data = 5.0 - 3.0 * np.exp(-t / 2.0)
+        sim = np.exp(-t / 2.0)                        # wrong sign
+        scale, baseline, neg = _fit_scale_baseline_lsq(sim, data, 1, return_negative=True)
+        assert neg and scale == 0.0
+        P = self._design(t.size, 1)
+        ref = P @ np.linalg.lstsq(P, data, rcond=None)[0]
+        np.testing.assert_allclose(baseline, ref, rtol=0, atol=1e-12)
+
+    def test_constrained_is_never_worse_than_abs(self):
+        from torchspin.esfit import _fit_scale_baseline_lsq
+        rng = np.random.default_rng(1)
+        for order in (-1, 0, 2):
+            for _ in range(20):
+                sim, data = rng.standard_normal(50), rng.standard_normal(50)
+                s_c, b_c = _fit_scale_baseline_lsq(sim, data, order)
+                s_a, b_a = _fit_scale_baseline_lsq(sim, data, order, negative_scale='abs')
+                assert s_c >= 0 and s_a >= 0
+                assert (np.linalg.norm(s_c * sim + b_c - data)
+                        <= np.linalg.norm(s_a * sim + b_a - data) + 1e-12)
+
+    def test_positive_scale_unchanged(self):
+        from torchspin.esfit import _fit_scale_baseline_lsq
+        x = np.linspace(0, 1, 100)
+        sim = np.sin(8 * x)
+        data = 2.0 * sim + 0.3 + 0.1 * x
+        for mode in ('clip', 'abs'):
+            scale, baseline = _fit_scale_baseline_lsq(sim, data, 1, negative_scale=mode)
+            assert abs(scale - 2.0) < 1e-10
+            np.testing.assert_allclose(baseline, 0.3 + 0.1 * x, atol=1e-10)
+
+    def test_inversion_recovery_wrong_sign_warns(self):
+        """The reproducer from #6: with the wrong model sign the fit no longer
+        minimizes a mirrored objective, and esfit warns."""
+        t = np.linspace(0, 10, 400)
+        y = 5.0 - 3.0 * np.exp(-t / 2.0) + 0.01 * np.random.default_rng(0).standard_normal(t.size)
+        opts = FitOptions(method='levmar', baseline=0, target='fcn', verbosity=0,
+                          compute_uncertainties=False)
+        with pytest.warns(UserWarning, match="negative scale"):
+            r = esfit(y, lambda p: np.exp(-t / p[0]), np.array([2.2]),
+                      lb=np.array([0.1]), ub=np.array([20.0]), options=opts)
+        # scale 0 + constant baseline: the RMSD is the data's own spread
+        assert r.scale == 0.0
+        assert abs(r.rmsd - np.std(y)) < 1e-9
+        r = esfit(y, lambda p: -np.exp(-t / p[0]), np.array([2.2]),
+                  lb=np.array([0.1]), ub=np.array([20.0]), options=opts)
+        assert abs(r.pfit[0] - 2.0) < 0.02
+
+    def test_autoscale_none_baseline_fits_data_minus_sim(self):
+        from torchspin.esfit import compute_residuals, ModelWrapper, ParameterHandler
+        x = np.linspace(0, 1, 80)
+        data = np.sin(6 * x) + 0.4 - 0.2 * x
+        ph = ParameterHandler(np.array([1.0]), vary=np.array([0.5]))
+        mw = ModelWrapper(lambda p: p[0] * np.sin(6 * x), np.array([1.0]), x.size)
+        for autoscale in ('none', 'maxabs'):
+            opts = FitOptions(autoscale=autoscale, baseline=1, target='fcn')
+            _, rmsd, info = compute_residuals(np.array([1.0]), data, mw, ph, opts)
+            resid = data - info['scale'] * info['sim']
+            P = self._design(x.size, 1)
+            ref = P @ np.linalg.lstsq(P, resid, rcond=None)[0]
+            np.testing.assert_allclose(info['baseline'], ref, atol=1e-12)
+        # with autoscale='none' the model plus a linear baseline is exact
+        _, rmsd, _ = compute_residuals(np.array([1.0]), data, mw, ph,
+                                       FitOptions(autoscale='none', baseline=1, target='fcn'))
+        assert rmsd < 1e-12

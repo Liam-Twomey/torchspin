@@ -1663,3 +1663,62 @@ class TestDictStyleArrayFields:
         # p0 itself is untouched
         np.testing.assert_allclose(sys0.g.numpy(), [[2.0, 2.0, 2.0]])
         assert sys0.lw == [1.0, 2.0]
+
+
+class TestBinnedGarlicFiniteDifferences:
+    """GitHub #5: garlic's nearest-bin accumulation is piecewise-constant in
+    the line positions, so finite-difference Jacobians are zero for g and A."""
+
+    exp = Experiment(mwFreq=9.65, Range=[300.0, 440.0], nPoints=400, Harmonic=1)
+
+    def _sim(self, p, accum):
+        from torchspin import garlic
+        sys = SpinSystem(S=[0.5], g=p[0], Nucs=['91Zr'], A=p[1], lw=[abs(p[2]), abs(p[3])])
+        opt = Options(AccumMethod=accum) if accum else None
+        return np.asarray(garlic(sys, self.exp, opt)[1], float)
+
+    def _data(self):
+        clean = self._sim([1.885, 780.0, 1.0, 2.0], 'explicit')
+        rng = np.random.default_rng(0)
+        return clean + 0.01 * np.ptp(clean) * rng.standard_normal(clean.size)
+
+    def test_dead_parameter_warns_and_reports_nan_sigma(self):
+        data = self._data()
+        opts = FitOptions(method='levmar', max_iter=50, verbosity=0)
+        with pytest.warns(UserWarning, match="do not change with parameter"):
+            r = esfit(data, lambda p: self._sim(p, 'binning'), np.array([1.8853, 785.0, 1.2, 1.8]),
+                      vary=np.array([0.005, 30.0, 0.8, 0.8]), options=opts)
+        assert np.isnan(r.pstd[1])                      # A: undetermined, not sigma = 0
+        assert np.all(np.isfinite(r.pstd[2:]))          # line widths still estimated
+
+    def test_smooth_model_has_no_warning(self):
+        import warnings as _w
+        data = self._data()
+        with _w.catch_warnings():
+            _w.simplefilter('error', UserWarning)
+            r = esfit(data, lambda p: self._sim(p, 'linear'), np.array([1.8853, 785.0, 1.2, 1.8]),
+                      vary=np.array([0.005, 30.0, 0.8, 0.8]),
+                      options=FitOptions(method='levmar', max_iter=100, verbosity=0))
+        assert abs(r.pfit[1] - 780.0) < 2.0
+        assert np.all(np.isfinite(r.pstd)) and np.all(r.pstd > 0)
+
+    def test_dict_style_garlic_switches_default_binning_to_linear(self):
+        from torchspin import garlic
+        from torchspin.esfit import ModelWrapper
+        data = self._data()
+        sys0 = SpinSystem(S=[0.5], g=1.8853, Nucs=['91Zr'], A=785.0, lw=[1.2, 1.8])
+        vary = {'Sys': {'g': [[0.015, 0, 0]], 'A': [[90.0, 0, 0]], 'lw': [0.8, 0.8]}}
+        r = esfit(data, garlic, {'Sys': sys0, 'Exp': self.exp}, vary=vary,
+                  options=FitOptions(method='levmar', max_iter=100, verbosity=0))
+        a_iso = (r.pfit[1] + 2 * 785.0) / 3
+        assert abs(a_iso - 780.0) < 2.0
+        assert np.all(np.isfinite(r.pstd)) and np.all(r.pstd > 0)
+        # a user-chosen AccumMethod is respected
+        mw = ModelWrapper(garlic, {'Sys': sys0}, data.size)
+        assert mw._fd_friendly_options(Options(AccumMethod='binning'), sys0, self.exp).AccumMethod == 'binning'
+        user_opt = Options()
+        assert mw._fd_friendly_options(user_opt, sys0, self.exp).AccumMethod == 'linear'
+        assert user_opt.AccumMethod is None              # not mutated
+        # fast motion defaults to 'explicit' and is left alone
+        fm = SpinSystem(S=[0.5], g=2.0, Nucs=['14N'], A=40.0, lw=[0.1, 0.1], tcorr=1e-10)
+        assert mw._fd_friendly_options(None, fm, self.exp) is None

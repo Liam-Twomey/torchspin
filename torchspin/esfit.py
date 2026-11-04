@@ -5,6 +5,7 @@ This module provides functionality for fitting experimental EPR data by
 optimizing simulation parameters to minimize residuals.
 """
 
+import dataclasses
 import time
 import warnings
 
@@ -772,6 +773,43 @@ class ModelWrapper:
         
         return False
     
+    @staticmethod
+    def _garlic_uses_binning(sys, exp) -> bool:
+        """Whether garlic's default accumulation for ``sys``/``exp`` is
+        'binning': not in the fast-motion regime (any component with a
+        positive correlation time) and no mwPhase (which needs 'explicit')."""
+        if exp is not None and float(getattr(exp, 'mwPhase', 0.0) or 0.0) != 0.0:
+            return False
+        for c in (sys if isinstance(sys, (list, tuple)) else [sys]):
+            for name, tf in (('logtcorr', lambda v: 10.0 ** v), ('tcorr', lambda v: v)):
+                v = getattr(c, name, None)
+                if v is not None:
+                    v0 = float(torch.as_tensor(v, dtype=torch.float64).detach().reshape(-1)[0])
+                    if tf(v0) > 0:
+                        return False
+                    break
+        return True
+
+    def _fd_friendly_options(self, opt, sys=None, exp=None):
+        """For garlic, replace the default nearest-bin accumulation by the
+        two-bin linear split when the user left ``Opt.AccumMethod`` unset.
+
+        Nearest-bin sticks make the spectrum piecewise-constant in g and A, so
+        every finite-difference Jacobian (levmar, trf, uncertainties) is zero
+        for them. 'linear' is the form garlic itself uses on the autograd graph.
+        Fast-motion and mwPhase runs default to 'explicit' and are left alone.
+        """
+        if getattr(self.model_fn, '__name__', '') != 'garlic':
+            return opt
+        if not self._garlic_uses_binning(sys, exp):
+            return opt
+        from torchspin.experiment import Options
+        if opt is None:
+            return Options(AccumMethod='linear')
+        if getattr(opt, 'AccumMethod', None) is None:
+            return dataclasses.replace(opt, AccumMethod='linear')
+        return opt
+
     def __call__(self, pvec_active: np.ndarray, param_handler: ParameterHandler) -> np.ndarray:
         """
         Evaluate model with active parameter vector.
@@ -797,7 +835,8 @@ class ModelWrapper:
                 sys = params_dict.get('Sys')
                 exp = params_dict.get('Exp')
                 opt = params_dict.get('Opt', None)
-                
+                opt = self._fd_friendly_options(opt, sys, exp)
+
                 if opt is not None:
                     B, spec = self.model_fn(sys, exp, opt)
                 else:
@@ -2030,6 +2069,7 @@ def _optimize_levmar(
         x1 = x.copy(); x1[i] += delta
         _, f1 = funeval(x1)
         J[:, i] = (f1 - f) / delta
+    _warn_dead_jacobian_columns(J, 'levmar')
     g = J.T @ f
     norm_g = np.linalg.norm(g, ord=np.inf)
     A = J.T @ J
@@ -2127,8 +2167,42 @@ def _optimize_trf(
     # SciPy reports no iteration count for 'trf'; each trust-region iteration
     # evaluates the Jacobian once, so njev is the closest measure.
     n_iter = fit.njev if getattr(fit, 'njev', None) is not None else fit.nfev
+    if getattr(fit, 'jac', None) is not None:
+        _warn_dead_jacobian_columns(fit.jac, 'trf')
     return OptimizeResult(x=fit.x, fun=float(np.sqrt(np.mean(fit.fun ** 2))), success=bool(fit.success),
                           message=str(fit.message), nfev=int(fit.nfev), nit=int(n_iter))
+
+
+_DEAD_COLUMN_HINT = (
+    "A piecewise-constant model has no finite-difference derivative: garlic's "
+    "default Options.AccumMethod='binning' places each line in its nearest field "
+    "bin, so small shifts of g or A do not change the spectrum. Use "
+    "AccumMethod='linear' or 'explicit' in the model.")
+
+
+def _dead_jacobian_columns(J: np.ndarray, rel_tol: float = 1e-12) -> np.ndarray:
+    """Boolean mask of Jacobian columns that are zero, or negligible relative to
+    the largest column (the parameter has no effect at the finite-difference step)."""
+    J = np.asarray(J, dtype=float)
+    if J.ndim != 2 or J.shape[1] == 0:
+        return np.zeros(0, dtype=bool)
+    norms = np.linalg.norm(J, axis=0)
+    ref = float(np.max(norms)) if np.all(np.isfinite(norms)) else 0.0
+    return ~(norms > rel_tol * ref) if ref > 0 else np.ones(J.shape[1], dtype=bool)
+
+
+def _warn_dead_jacobian_columns(J: np.ndarray, where: str, names=None) -> np.ndarray:
+    """Warn if any Jacobian column is dead (see _dead_jacobian_columns); return the mask."""
+    dead = _dead_jacobian_columns(J)
+    if dead.any():
+        idx = np.flatnonzero(dead)
+        label = ', '.join(str(names[i]) if names is not None else f'#{i}' for i in idx)
+        warnings.warn(
+            f"esfit ({where}): the residuals do not change with parameter(s) {label} at "
+            f"the finite-difference step, so they are invisible to the "
+            f"{'optimizer' if where != 'uncertainties' else 'error estimate'}. "
+            + _DEAD_COLUMN_HINT, UserWarning, stacklevel=3)
+    return dead
 
 
 def _estimate_uncertainties(
@@ -2157,13 +2231,29 @@ def _estimate_uncertainties(
         return residuals
     
     # Compute Jacobian via finite differences
-    J = _jacobian_finite_diff(residuals_fn, pfit)
-    
+    J_all = _jacobian_finite_diff(residuals_fn, pfit)
+    # A parameter the residuals do not depend on would get sigma = 0 from pinv,
+    # which reads as perfectly determined. Report it as undetermined (nan)
+    # instead and leave it out of the covariance of the others.
+    dead = _warn_dead_jacobian_columns(J_all, 'uncertainties', param_handler.get_names())
+    live = ~dead
+    if not live.any():
+        nan = np.full(len(pfit), np.nan)
+        return {'pstd': nan, 'ci95': np.column_stack([nan, nan]),
+                'cov': np.full((len(pfit),) * 2, np.nan),
+                'corr': np.full((len(pfit),) * 2, np.nan)}
+    J = J_all[:, live]
+
     # Compute residuals at optimum
     residuals = residuals_fn(pfit)
     n_data = len(residuals)
     n_params = len(pfit)
-    
+
+    def _embed(m_live):
+        m = np.full((n_params, n_params), np.nan)
+        m[np.ix_(live, live)] = m_live
+        return m
+
     # Compute covariance matrix (HC1 estimator)
     try:
         JtJ_inv = np.linalg.pinv(J.T @ J)
@@ -2176,14 +2266,16 @@ def _estimate_uncertainties(
 
         # Standard deviations — clamp to avoid sqrt(negative) from float noise
         diag_cov = np.maximum(np.diag(cov), 0.0)
-        pstd = np.sqrt(diag_cov)
-
-        # 95% confidence intervals (1.96 = norm.ppf(0.975))
-        ci95 = np.column_stack([pfit - 1.96 * pstd, pfit + 1.96 * pstd])
 
         # Correlation matrix — use same clamped diagonal to avoid NaN
         D_inv = np.diag(1.0 / (np.sqrt(diag_cov) + 1e-12))
-        corr = D_inv @ cov @ D_inv
+        corr = _embed(D_inv @ cov @ D_inv)
+        cov = _embed(cov)
+        pstd = np.full(n_params, np.nan)
+        pstd[live] = np.sqrt(diag_cov)
+
+        # 95% confidence intervals (1.96 = norm.ppf(0.975))
+        ci95 = np.column_stack([pfit - 1.96 * pstd, pfit + 1.96 * pstd])
         
         return {
             'pstd': pstd,
@@ -2292,6 +2384,16 @@ def esfit(
         where ``p`` is a parameter vector. For torchspin simulators (pepper,
         garlic, chili, etc.), use dict-style ``p0``/``vary`` to fit spin-system
         and experiment parameters by name (see examples below).
+
+        The local optimizers ('levmar', 'trf', 'lbfgsb') and the uncertainty
+        estimate use finite differences, so the model must be smooth in its
+        parameters. garlic's default ``Options.AccumMethod='binning'`` is not:
+        it puts each line in its nearest field bin, so the spectrum is
+        piecewise-constant in g and A. When esfit calls garlic itself
+        (dict style), it switches an unset AccumMethod to 'linear'. A custom
+        model that wraps garlic should pass ``Options(AccumMethod='linear')``
+        or ``'explicit'``. esfit warns when a parameter has no effect on the
+        residuals and reports its ``pstd`` as nan, not 0.
     p0 : array or dict
         Initial parameters. Array for custom model functions; dict-style
         (mirroring ``SpinSystem``/``Experiment`` fields) for torchspin

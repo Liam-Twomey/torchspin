@@ -635,6 +635,21 @@ def saffron(
     # historically inferred it from nonzero Exp.tp. Opt.SimulationMode=None
     # keeps that inference, an explicit value overrides it.
     predefined = isinstance(exp.Sequence, str) and exp.Sequence in _EXP_NAMES
+    real_pulses = (exp.tp is not None
+                   and any(float(v) != 0.0 for v in np.atleast_1d(exp.tp)))
+    # EasySpin saffron.m:351 rejects a predefined sequence with real pulses in
+    # every mode. Checked before engine selection because nonzero Exp.tp would
+    # otherwise infer the real-pulse engine, whose predefined templates
+    # (s_predefinedexperiments) use fixed 16/32 ns pulses and never read Exp.tp,
+    # so the requested pulse lengths would be silently ignored.
+    if predefined and real_pulses:
+        raise ValueError(
+            "You cannot use predefined sequences (Exp.Sequence) with real "
+            "pulses (Exp.tp). Remove Exp.tp for the ideal-pulse "
+            f"{exp.Sequence} simulation, or write the sequence explicitly "
+            "for real pulses, e.g. Sequence=[P90, tau, P180, tau] with pulse "
+            "dicts {'tp': ..., 'Flip': ...}, Dim1=['d1,d2', dt], DetWindow=0 "
+            "and Opt.SimulationMode='thyme'.")
     sim_mode = opt.SimulationMode
     if sim_mode is not None:
         sim_mode = str(sim_mode).lower()
@@ -643,8 +658,6 @@ def saffron(
                 f"Opt.SimulationMode must be 'fast' or 'thyme', got "
                 f"{opt.SimulationMode!r}.")
     else:
-        real_pulses = (exp.tp is not None
-                       and any(float(v) != 0.0 for v in np.atleast_1d(exp.tp)))
         sequence_is_list = (not isinstance(exp.Sequence, str)
                             and exp.Sequence is not None)
         if exp.DetWindow is not None or sequence_is_list or real_pulses:
@@ -657,8 +670,8 @@ def saffron(
         return saffron_thyme(sys, exp, opt)
 
     # --- Fast (ideal-pulse) algorithm from here on ---
-    # EasySpin saffron.m:303 rejects the spidyan-only detection fields, and
-    # saffron.m:351 rejects predefined sequences with real pulses.
+    # EasySpin saffron.m:303 rejects the spidyan-only detection fields
+    # (predefined sequences with real pulses were rejected above, saffron.m:351).
     for _f in ('DetSequence', 'DetOperator'):
         if getattr(exp, _f, None) is not None:
             raise ValueError(
@@ -669,13 +682,6 @@ def saffron(
         raise ValueError(
             "Exp.DetIntegrate only applies to the real-pulse engine. Set "
             "Opt.SimulationMode='thyme' to use it.")
-    if predefined and exp.tp is not None and any(
-            float(v) != 0.0 for v in np.atleast_1d(exp.tp)):
-        raise ValueError(
-            "You cannot use predefined sequences (Exp.Sequence) with real "
-            "pulses (Exp.tp) in the fast algorithm. Set "
-            "Opt.SimulationMode='thyme' to run a predefined sequence with "
-            "real pulses.")
     if not isinstance(exp.Sequence, str):
         raise ValueError(
             "The fast algorithm needs Exp.Sequence to be a predefined "

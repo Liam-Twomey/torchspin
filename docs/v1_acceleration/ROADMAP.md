@@ -40,7 +40,8 @@ stored baseline. Raw campaign data are not committed.
 | 2026-11-08 | 4c9a009 vs v0.6.1 | 64-core workstation, 2× RTX 3090, idle, 32-core pinned set | CPU 1/8/32 threads: all 13 workloads within ±7 % of v0.6.1 | Phase 1 is neutral on speed, as intended: it fixes correctness and measurement. The thread-backend per-worker budget was 2.1× slower at 8 threads and was reverted (4c9a009); A/B rerun 11.34 s vs 11.40 s. |
 | 2026-11-08 | 0.6.2 fixes | same host, CUDA | Mn(II) matrix 34.7 → 1.16 s, Cu/2N 8.6 → 0.83 s, dense strain OOM → 1.86 s; CPU/CUDA NRMSE ≤ 3e-13 | CUDA is still hybrid (≤ 20 % of wall time in kernels), the Phase 3 target. Released as 0.6.2. |
 | 2026-11-08 | 72a7809 vs v0.6.1 | SLURM CPU nodes (shared, 224-core) | not usable: unchanged code varied up to 2.8× between runs | Shared-node timing needs a paired A/B design on one whole node. |
+| 2026-11-08 | 6c03935 vs v0.6.1 | SLURM CPU node, whole 224-core node, paired A B A B, taskset-pinned | CPU 1/8/32/64 threads: dev/v0.6.1 median ratio 0.88–1.23; every ratio whose replicate ranges are disjoint lies in 0.90–1.01 | Confirms the workstation result: Phase 1 is speed-neutral. The 8-thread 1.19–1.23 ratios (fit loop, strain) have overlapping ranges, i.e. node noise. v0.6.1 crashed twice in esfit_swarm_threads_matrix on the pepper thread race fixed in 0.6.2. |
 
 **Open from Phase 1:**
-- The serial 20-call fit loop is still slower at 32 threads than at 8 (2.8 s vs 1.5 s): oversubscription inside one process, not addressed yet.
+- Serial fits get slower when threads are added: on the cluster node, v0.6.1's 20-call fit loop takes 2.2 s at 1 thread, 6.6 s at 8 and 4.0 s at 32; esfit levmar takes 3.6 s, 11.0 s and 6.4 s (the workstation showed the same pattern, 1.5 s at 8 vs 2.8 s at 32). Oversubscription inside one process: the first Phase 2 target.
 - esfit's thread backend is about 15× slower than its process backend on the same swarm fit, at every thread count.

@@ -6,6 +6,22 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.6.3] — 2026-11-08
+
+### Fixed
+
+- **Fits got slower when threads were added on many-core Linux machines.**
+  After each parallel region torch's OpenMP threads spin-wait, and a fit runs
+  many small spectra, so the Python thread and torchspin's worker threads
+  competed with spinning threads for the cores. On a 224-core Linux node one
+  fit-model call (nitroxide, GridSize 31×4) took 84 ms on 1 thread and 554 ms
+  on 8; the 4-parameter levmar fit benchmark took 3.6 s on 1 thread and 11.0 s
+  on 8. `import torchspin` now sets `OMP_WAIT_POLICY=PASSIVE` (idle threads
+  sleep), which brings the 8-thread call to 93 ms. The OpenMP runtime reads the
+  variable once, when torch loads, so this takes effect only when torchspin is
+  imported before torch; an explicit user setting is never changed. See
+  `docs/pitfalls.md`, "Threads and performance".
+
 ## [0.6.2] — 2026-11-08
 
 Bug fixes found while running the GPU tests on a CUDA host.

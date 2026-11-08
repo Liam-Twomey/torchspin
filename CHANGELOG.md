@@ -51,7 +51,7 @@ Work toward v1.0 performance on branch `dev/v1-acceleration`; see
 
 ### Fixed
 
-- **pepper on CUDA failed in 0.6.x** with "Expected all tensors to be on the
+- **pepper on CUDA failed in every public release (0.3.0–0.6.1)** with "Expected all tensors to be on the
   same device". The transition pre-selection (`_preselect_pairs`) built its
   rate and mask tensors on the CPU, so every `Options(device='cuda')` call
   aborted before simulating. The CUDA consistency tests catch this, but they

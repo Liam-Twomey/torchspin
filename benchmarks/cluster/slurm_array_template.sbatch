@@ -55,13 +55,17 @@ tag="${DEVICE}_threads${th}"
 {
   echo "date: $(date -Is)"
   echo "array task: $idx  threads: $th  device: $DEVICE  cpus allocated: ${SLURM_CPUS_PER_TASK:-?}"
-  python - <<'PY'
+  (cd "$REPO" && python - <<'PY'
 import torch, numpy, scipy, torchspin
-from torchspin.parallel import cpu_budget
 print('torch', torch.__version__, 'cuda', torch.version.cuda, 'available', torch.cuda.is_available())
-print('numpy', numpy.__version__, 'scipy', scipy.__version__, 'torchspin', torchspin.__version__)
-print('cpu_budget', cpu_budget())
+print('numpy', numpy.__version__, 'scipy', scipy.__version__, 'torchspin', torchspin.__version__, torchspin.__file__)
+try:
+    from torchspin.parallel import cpu_budget
+    print('cpu_budget', cpu_budget())
+except ImportError:        # torchspin older than the thread-budget module
+    pass
 PY
+  ) || true
   git -C "$REPO" rev-parse HEAD 2>/dev/null || true
   [ "$DEVICE" = cpu ] || nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv || true
 } > "$out_dir/env_${tag}.txt" 2>&1

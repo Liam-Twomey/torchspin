@@ -9,19 +9,8 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Work toward v1.0 performance on branch `dev/v1-acceleration`; see
 `docs/v1_acceleration/ROADMAP.md`.
 
-### Changed — behavior differs from 0.6.1
+### Changed — behavior differs from 0.6.2
 
-- **Seeded cardamom results no longer depend on the thread count.** The fast
-  path groups orientations, and the group size scales with
-  `torch.get_num_threads()`. Every group used to draw its trajectories from the
-  same `CardamomPar.seed`, so a seeded spectrum changed with the number of
-  threads, and orientations in different groups shared identical trajectories.
-  Each orientation now draws from its own stream, derived from the seed with
-  `numpy.random.SeedSequence`. The global-dynamics (`DiffGlobal`) trajectories
-  of a group also started from a spiral grid over the whole group rather than
-  over `nTraj`, which made the result depend on the group size too; they now
-  start from the same per-orientation grid as the serial path. Seeded cardamom
-  spectra differ from 0.6.1. Unseeded runs are unaffected.
 - **`esfit(..., n_workers='auto')`** counts the cores the process may use (CPU
   affinity, then `SLURM_CPUS_PER_TASK`, then `os.cpu_count()`), not every core
   on the machine. Inside a batch allocation or under `taskset` it no longer
@@ -39,37 +28,72 @@ Work toward v1.0 performance on branch `dev/v1-acceleration`; see
 
   Workers of esfit's thread backend now each get their share of the budget,
   instead of every worker sizing its inner pools to the whole machine.
-- `DiffusionPar.seed` and `JumpPar.seed` accept a sequence of per-block seeds:
-  the trajectories split into equal blocks with independent random streams.
 - Optional extra `[hpc]` (`threadpoolctl`, `cloudpickle`).
 - Benchmarks:
   - end-to-end esfit workloads (levmar, swarm with process and thread
     backends, a nested-parallelism case);
   - `benchmarks/analysis/compare_baseline.py`, which saves host-free baselines
     and flags regressions;
-  - a generic SLURM job-array template, `benchmarks/cluster/slurm_array_template.sbatch`.
+  - a generic SLURM job-array template, `benchmarks/cluster/slurm_array_template.sbatch`;
+  - `run_workloads.py --save-outputs`.
 
 ### Fixed
 
-- **pepper on CUDA failed in every public release (0.3.0–0.6.1)** with "Expected all tensors to be on the
-  same device". The transition pre-selection (`_preselect_pairs`) built its
-  rate and mask tensors on the CPU, so every `Options(device='cuda')` call
-  aborted before simulating. The CUDA consistency tests catch this, but they
-  only run on a GPU host.
-- `sigeq(..., polarization=True)` built its identity matrix on the CPU, so it
-  failed with a device mismatch for a CUDA Hamiltonian.
 - `benchmarks/workloads/run_workloads.py --threads N` now overwrites the native
   thread variables. With an inherited `OMP_NUM_THREADS` (as batch scripts set
   it), "1-thread" runs used to keep every core in the native pools. It also
   caps Apple Accelerate (`VECLIB_MAXIMUM_THREADS`). `--procs` starts its
   process pool once, outside the timed replicates.
-- The garlic CPU-vs-CUDA test compared the CPU with itself (garlic has no
-  device path), so it is removed. salt and `sigeq` gained real CPU-vs-CUDA tests.
 
 ### Removed
 
 - `benchmarks/cluster/slurm_cpu.sh` and `slurm_gpu.sh`, replaced by the
   array template. The CPU script's thread sweep was mislabeled (see Fixed).
+
+## [0.6.2] — 2026-11-08
+
+Bug fixes found while running the GPU tests on a CUDA host.
+
+### Fixed
+
+- **pepper on CUDA failed in every public release (0.3.0–0.6.1)** with
+  "Expected all tensors to be on the same device". The transition pre-selection
+  (`_preselect_pairs`) built its rate and mask tensors on the CPU, so every
+  `Options(device='cuda')` call aborted before simulating. The CPU-vs-CUDA
+  consistency tests catch this, but they only run on a GPU host.
+- **pepper was not thread-safe.** The slot keys of the matrix method were kept
+  in a function attribute shared by the whole process. With concurrent pepper
+  calls, such as `esfit(..., FitOptions(workers='threads'))` or any user thread
+  pool, one call could read another's keys: `_filter_slots` raised
+  `IndexError: list index out of range`, or `separate='transitions'` mislabeled
+  transitions. The keys are now per thread. This was found when a benchmark
+  fit with the thread backend crashed on a single-core allocation.
+- `sigeq(..., polarization=True)` built its identity matrix on the CPU, so it
+  failed with a device mismatch for a CUDA Hamiltonian.
+
+### Changed — behavior differs from 0.6.1
+
+- **Seeded cardamom results no longer depend on the thread count.** The fast
+  path groups orientations, and the group size scales with
+  `torch.get_num_threads()`. Every group used to draw its trajectories from the
+  same `CardamomPar.seed`, so a seeded spectrum changed with the number of
+  threads, and orientations in different groups shared identical trajectories.
+  Each orientation now draws from its own stream, derived from the seed with
+  `numpy.random.SeedSequence`. The global-dynamics (`DiffGlobal`) trajectories
+  of a group also started from a spiral grid over the whole group rather than
+  over `nTraj`, which made the result depend on the group size too; they now
+  start from the same per-orientation grid as the serial path. Seeded cardamom
+  spectra differ from 0.6.1. Unseeded runs are unaffected.
+
+### Added
+
+- `DiffusionPar.seed` and `JumpPar.seed` accept a sequence of per-block seeds:
+  the trajectories split into equal blocks with independent random streams.
+
+### Tests
+
+- The garlic CPU-vs-CUDA test compared the CPU with itself (garlic has no device
+  path) and is removed. salt and `sigeq` have real CPU-vs-CUDA tests.
 
 ## [0.6.1] — 2026-11-04
 

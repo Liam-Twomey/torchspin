@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import functools
 import math
+import threading
 import warnings
 from typing import Optional
 
@@ -216,6 +217,14 @@ def _interp_sph(
     return result
 
 
+# The (u, v, occurrence) key of every slot from the most recent _transition_slots
+# call, kept in sync by _filter_slots and read by the separate='transitions' path.
+# It is per thread: it used to be a function attribute shared by the whole process,
+# so concurrent pepper calls (esfit workers='threads') could read each other's
+# keys, which raised IndexError or mislabeled transitions.
+_slot_state = threading.local()
+
+
 def _transition_slots(all_B, all_I, all_W, all_pairs, n_orient):
     """Group per-orientation resonances into transition slots across the grid.
 
@@ -246,7 +255,7 @@ def _transition_slots(all_B, all_I, all_W, all_pairs, n_orient):
                 B_arrs[i][k] = Bn[i]; I_arrs[i][k] = In[i]
                 if Wn is not None and i < Wn.shape[0]:
                     W_arrs[i][k] = Wn[i]
-        _transition_slots.last_keys = None      # index-matched slots (perturbation path)
+        _slot_state.keys = None      # index-matched slots (perturbation path)
         return B_arrs, I_arrs, W_arrs
     slots: dict = {}
     B_arrs: list = []; I_arrs: list = []; W_arrs: list = []
@@ -272,7 +281,7 @@ def _transition_slots(all_B, all_I, all_W, all_pairs, n_orient):
             B_arrs[j][k] = Bn[i]; I_arrs[j][k] = In[i]
             if Wn is not None and i < Wn.shape[0]:
                 W_arrs[j][k] = Wn[i]
-    _transition_slots.last_keys = sorted(slots.keys(), key=lambda kk: slots[kk])   # (u, v, occurrence) per slot
+    _slot_state.keys = sorted(slots.keys(), key=lambda kk: slots[kk])   # (u, v, occurrence) per slot
     return B_arrs, I_arrs, (W_arrs if have_widths else None)
 
 
@@ -286,9 +295,9 @@ def _filter_slots(B_arrs, I_arrs, W_arrs, threshold):
     slot_max = np.array([np.nanmax(np.abs(I)) if np.isfinite(I).any() else 0.0 for I in I_arrs])
     gmax = slot_max.max() if slot_max.size else 0.0
     keep = [k for k in range(len(I_arrs)) if slot_max[k] >= threshold * gmax]
-    keys = getattr(_transition_slots, 'last_keys', None)
+    keys = getattr(_slot_state, 'keys', None)
     if keys is not None:
-        _transition_slots.last_keys = [keys[k] for k in keep]
+        _slot_state.keys = [keys[k] for k in keep]
     return ([B_arrs[k] for k in keep], [I_arrs[k] for k in keep],
             None if W_arrs is None else [W_arrs[k] for k in keep])
 
@@ -1325,7 +1334,7 @@ def _pepper_single(
     _row_max: dict = {}
 
     def _rid(i_t):
-        keys = getattr(_transition_slots, 'last_keys', None)
+        keys = getattr(_slot_state, 'keys', None)
         return (keys[i_t][0], keys[i_t][1]) if keys is not None and i_t < len(keys) else i_t
 
     def _row(i_t):

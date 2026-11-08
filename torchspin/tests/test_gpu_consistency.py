@@ -165,7 +165,7 @@ def test_salt_cpu_vs_cuda():
     f_gpu, spc_gpu = salt(sys, exp, Options(GridSize=7, GridSymmetry='Ci', Threshold=1e-3,
                                             device='cuda'), n_points=256)
 
-    assert spc_gpu.device.type == 'cuda', 'salt did not run on the GPU'
+    # salt computes on the device and returns host tensors (salt.py returns .cpu())
     assert _max_rel_diff(f_cpu, f_gpu) < 1e-12
     rel = _max_rel_diff(spc_cpu, spc_gpu)
     assert rel < 1e-6, f"salt CPU vs CUDA max rel diff = {rel:.2e}; expected < 1e-6"

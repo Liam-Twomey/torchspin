@@ -258,7 +258,7 @@ Profiled on an Apple-silicon development machine for `chili_powder_potential`: 3
 
 ## Cluster / SLURM readiness
 
-- `benchmarks/cluster/slurm_cpu.sh` exports `OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK`
+- *(Fixed in Phase 1: replaced by `slurm_array_template.sbatch`.)* `benchmarks/cluster/slurm_cpu.sh` exported `OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK`
   (`:13`). `run_workloads._apply_thread_env` then uses `os.environ.setdefault`
   (`run_workloads.py:56-61`), so the "1-thread" and "4-thread" sweep points actually run
   with 16 native threads. OPENBLAS is never capped, and the script points to a missing

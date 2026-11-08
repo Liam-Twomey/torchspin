@@ -23,7 +23,7 @@ import pytest
 import torch
 
 from torchspin import (SpinSystem, Experiment, Options,
-                       pepper, garlic, differentiable_spectrum)
+                       pepper, differentiable_spectrum)
 from torchspin.saffron import saffron, PulseExperiment, SaffronOptions
 
 
@@ -141,33 +141,46 @@ def test_pepper_cpu_vs_cuda_gstrain():
     assert rel < 1e-6, f"pepper g-strain CPU vs CUDA rel diff = {rel:.2e}"
 
 
+# garlic: no CUDA path
 # ---------------------------------------------------------------------------
-# garlic CPU vs GPU
+# garlic ignores Options.device: it is closed-form torch on the CPU. A CPU-vs-CUDA
+# comparison would compare the CPU result with itself, so there is no garlic test
+# here. Add one when garlic gains a device path.
+
+
+# ---------------------------------------------------------------------------
+# salt CPU vs GPU
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.skipif(not CUDA_AVAILABLE, reason=SKIP_REASON)
-def test_garlic_cpu_vs_cuda():
-    """garlic CPU vs CUDA — solution EPR pipeline."""
-    sys = SpinSystem(
-        S=[0.5], g=[[2.009, 2.006, 2.002]],
-        Nucs='14N', A=[[16.0, 16.0, 95.0]],
-        tcorr=1e-10, lw=[0.1, 0.0],
-    )
-    exp = Experiment(mwFreq=9.5, Range=[336.0, 342.0],
-                     nPoints=1024, Harmonic=1)
+def test_salt_cpu_vs_cuda():
+    """salt CPU vs CUDA: powder ENDOR (batched eigh of a 4x4 Hamiltonian)."""
+    from torchspin.salt import salt
+    sys = SpinSystem(S=0.5, g=2.0, Nucs='1H', A=[[10.0, 10.0, 10.0]], lw=[0.5, 0.0])
+    exp = Experiment(mwFreq=9.5, Range=[330.0, 355.0], nPoints=64, Harmonic=0)
 
-    opt_cpu = Options(Verbosity=0, device='cpu')
-    opt_gpu = Options(Verbosity=0, device='cuda')
+    f_cpu, spc_cpu = salt(sys, exp, Options(GridSize=7, GridSymmetry='Ci', Threshold=1e-3,
+                                            device='cpu'), n_points=256)
+    f_gpu, spc_gpu = salt(sys, exp, Options(GridSize=7, GridSymmetry='Ci', Threshold=1e-3,
+                                            device='cuda'), n_points=256)
 
-    _, spc_cpu = garlic(sys, exp, opt_cpu)
-    _, spc_gpu = garlic(sys, exp, opt_gpu)
-
+    assert spc_gpu.device.type == 'cuda', 'salt did not run on the GPU'
+    assert _max_rel_diff(f_cpu, f_gpu) < 1e-12
     rel = _max_rel_diff(spc_cpu, spc_gpu)
-    assert rel < 1e-4, (
-        f"garlic CPU vs CUDA max rel diff = {rel:.2e}; expected < 1e-4 "
-        f"(garlic uses FFT-based broadening which adds ~1e-6 noise)"
-    )
+    assert rel < 1e-6, f"salt CPU vs CUDA max rel diff = {rel:.2e}; expected < 1e-6"
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason=SKIP_REASON)
+def test_sigeq_polarization_on_cuda():
+    """sigeq with polarization keeps the input's device (it used to build the
+    identity on the CPU and fail with a device mismatch)."""
+    from torchspin.sigeq import sigeq
+    H = torch.diag(torch.tensor([-1.0e3, 1.0e3], dtype=torch.complex128))
+    ref = sigeq(H, 10.0, polarization=True)
+    out = sigeq(H.cuda(), 10.0, polarization=True)
+    assert out.device.type == 'cuda'
+    assert _max_rel_diff(ref, out) < 1e-12
 
 
 # ---------------------------------------------------------------------------

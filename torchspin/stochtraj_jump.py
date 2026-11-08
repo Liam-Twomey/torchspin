@@ -16,6 +16,7 @@ from typing import Optional
 import numpy as np
 from scipy.linalg import expm
 
+from torchspin._rng import draw, traj_generators
 from torchspin.stochtraj_diffusion import _euler2quat_active, _quat_to_rotmat_batch
 
 
@@ -30,15 +31,17 @@ class JumpPar:
     Attributes
     ----------
     seed:
-        Optional integer seed for the RNG.  When set, the generated
-        trajectory is bit-reproducible across runs.
+        Optional seed for the RNG.  When set, the generated trajectory is
+        bit-reproducible across runs.  A sequence of ``B`` seeds splits the
+        ``nTraj`` trajectories into ``B`` equal consecutive blocks with
+        independent streams (see ``DiffusionPar.seed``).
     """
     dt: float                              # time step (s) — required
     nSteps: Optional[int] = None           # number of steps
     nTraj: int = 1                         # number of trajectories
     tMax: Optional[float] = None           # total simulation time (s)
     StatesStart: Optional[np.ndarray] = None  # (nTraj,) starting states (1-based)
-    seed: Optional[int] = None             # RNG seed (None = non-deterministic)
+    seed: object = None                    # int, SeedSequence, or a sequence of per-block seeds (None = non-deterministic)
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +155,7 @@ def stochtraj_jump(
             nSteps = 500
 
     # --- Seeded RNG (reproducibility per JumpPar.seed) ---
-    _rng = np.random.default_rng(par.seed)
+    _gens = traj_generators(par.seed, nTraj)
 
     # --- Starting states ---
     if par.StatesStart is not None:
@@ -160,7 +163,7 @@ def stochtraj_jump(
         if starts.size == 1 and nTraj > 1:
             starts = np.full(nTraj, starts[0], dtype=int)
     else:
-        starts = _rng.integers(1, nStates + 1, size=nTraj)
+        starts = draw(_gens, lambda g, n: g.integers(1, nStates + 1, size=n), axis=0)
 
     # --- Cumulative transition probability matrix ---
     cumulTPM = np.cumsum(TPM, axis=1)
@@ -169,8 +172,10 @@ def stochtraj_jump(
     stateTraj = np.zeros((nSteps, nTraj), dtype=int)
     stateTraj[0, :] = starts
 
+    # each trajectory draws its uniform numbers from its block's generator, in order
+    traj_rng = [g for g, n in _gens for _ in range(n)]
     for iTraj in range(nTraj):
-        u = _rng.random(nSteps)
+        u = traj_rng[iTraj].random(nSteps)
         state = stateTraj[0, iTraj]
         for iStep in range(1, nSteps):
             # Find first state where cumulative prob exceeds random number

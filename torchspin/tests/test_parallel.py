@@ -159,8 +159,10 @@ def test_esfit_threads_per_worker_fits_budget(monkeypatch):
         torch.set_num_threads(prev)
 
 
-def test_esfit_thread_backend_gives_each_worker_a_share(monkeypatch):
-    """In the thread backend, each objective call runs inside its share of the budget."""
+def test_esfit_thread_backend_keeps_full_inner_budget(monkeypatch):
+    """The thread backend must not shrink the inner budget per worker. Native BLAS
+    threads cannot be capped per Python thread, so a smaller budget only removes
+    _linalg's serialized single-threaded pool and oversubscribes the cores."""
     monkeypatch.setattr(parallel, 'cpu_budget', lambda: 4)
     prev = torch.get_num_threads()
     torch.set_num_threads(max(prev, 4))
@@ -174,6 +176,6 @@ def test_esfit_thread_backend_gives_each_worker_a_share(monkeypatch):
         X = np.arange(8, dtype=float).reshape(4, 2)
         F = _esfit._eval_population(objective, X, n_workers=2, workers='threads')
         assert np.allclose(F, (X ** 2).sum(axis=1))
-        assert seen and all(s == 2 for s in seen)
+        assert seen and all(s == torch.get_num_threads() for s in seen)
     finally:
         torch.set_num_threads(prev)

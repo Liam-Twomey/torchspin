@@ -1645,18 +1645,14 @@ def _eval_population(
             import warnings
             warnings.warn("esfit: objective is not picklable and cloudpickle is not installed; using a thread pool")
     from concurrent.futures import ThreadPoolExecutor
-    from torchspin.parallel import thread_budget
-    n_thr = min(n_workers, n)
-    per = _threads_per_worker(n_thr)
-
-    def _budgeted(x):
-        # each worker's inner pools (eigh, accumulation) get their share of the
-        # budget instead of all cores each
-        with thread_budget(per):
-            return raw(x)
-
-    with ThreadPoolExecutor(max_workers=n_thr) as ex:
-        F = np.array(list(ex.map(_budgeted, list(X))))
+    # No per-worker thread_budget here. A smaller inner budget makes _linalg skip its
+    # serialized single-threaded LAPACK pool, but the native BLAS/OpenMP thread count
+    # is process-wide and cannot be capped per Python thread: each worker then calls
+    # LAPACK at the full process width, and n_workers x native threads oversubscribe
+    # the cores (measured 2.1x slower at 8 threads for the matrix method). The process
+    # backend is the one that partitions cores.
+    with ThreadPoolExecutor(max_workers=min(n_workers, n)) as ex:
+        F = np.array(list(ex.map(raw, list(X))))
     tracker.record_batch(X, F)
     return F
 

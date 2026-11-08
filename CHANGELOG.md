@@ -26,8 +26,9 @@ Work toward v1.0 performance on branch `dev/v1-acceleration`; see
     and BLAS too with `blas=True` when `threadpoolctl` is installed;
   - `native_thread_env(n)` for spawned workers.
 
-  Workers of esfit's thread backend now each get their share of the budget,
-  instead of every worker sizing its inner pools to the whole machine.
+  esfit's process backend uses it to size each worker; the thread backend
+  deliberately does not (native thread counts are process-wide, and a per-worker
+  budget there measured 2.1× slower).
 - Optional extra `[hpc]` (`threadpoolctl`, `cloudpickle`).
 - Benchmarks:
   - end-to-end esfit workloads (levmar, swarm with process and thread

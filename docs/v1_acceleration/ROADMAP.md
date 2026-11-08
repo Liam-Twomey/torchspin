@@ -37,4 +37,10 @@ stored baseline. Raw campaign data are not committed.
 
 | Date | Commit | Host class | Change | Notes |
 |---|---|---|---|---|
-| – | – | – | – | Phase 1 baseline pending |
+| 2026-11-08 | 4c9a009 vs v0.6.1 | 64-core workstation, 2× RTX 3090, idle, 32-core pinned set | CPU 1/8/32 threads: all 13 workloads within ±7 % of v0.6.1 | Phase 1 is neutral on speed, as intended: it fixes correctness and measurement. The thread-backend per-worker budget was 2.1× slower at 8 threads and was reverted (4c9a009); A/B rerun 11.34 s vs 11.40 s. |
+| 2026-11-08 | 0.6.2 fixes | same host, CUDA | Mn(II) matrix 34.7 → 1.16 s, Cu/2N 8.6 → 0.83 s, dense strain OOM → 1.86 s; CPU/CUDA NRMSE ≤ 3e-13 | CUDA is still hybrid (≤ 20 % of wall time in kernels), the Phase 3 target. Released as 0.6.2. |
+| 2026-11-08 | 72a7809 vs v0.6.1 | SLURM CPU nodes (shared, 224-core) | not usable: unchanged code varied up to 2.8× between runs | Shared-node timing needs a paired A/B design on one whole node. |
+
+**Open from Phase 1:**
+- The serial 20-call fit loop is still slower at 32 threads than at 8 (2.8 s vs 1.5 s): oversubscription inside one process, not addressed yet.
+- esfit's thread backend is about 15× slower than its process backend on the same swarm fit, at every thread count.

@@ -174,3 +174,20 @@ def test_thread_count_restored_under_concurrency():
     ref = torch.linalg.eigvalsh(H)
     for w in outs:
         assert torch.allclose(w, ref, atol=1e-12)
+
+
+def test_cuda_chunked_reassembles_batches(monkeypatch):
+    """The memory-bounded chunking used for CUDA batches returns the unchunked result
+    (checked on CPU tensors with a forced small chunk)."""
+    monkeypatch.setattr(_linalg, '_cuda_chunk', lambda nb, device: 7)
+    torch.manual_seed(5)
+    A = torch.randn(3, 10, 6, 6, dtype=torch.complex128)
+    H = A + A.conj().transpose(-1, -2)
+    E, V = _linalg._cuda_chunked(_linalg._safe_eigh, H)
+    E0, V0 = torch.linalg.eigh(H)
+    assert E.shape == E0.shape and V.shape == V0.shape
+    assert torch.allclose(E, E0, atol=1e-12)
+    # eigenvectors up to phase: compare the reconstructed matrices
+    assert torch.allclose(V @ torch.diag_embed(E).to(V.dtype) @ V.conj().transpose(-1, -2), H, atol=1e-10)
+    w = _linalg._cuda_chunked(_linalg._safe_eigvalsh, H)
+    assert torch.allclose(w, E0, atol=1e-12)

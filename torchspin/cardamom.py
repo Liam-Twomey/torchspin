@@ -36,6 +36,7 @@ from scipy.interpolate import interp1d
 
 from torchspin._cardamom_propagatedm import propagate_fast, propagate_istos
 from torchspin._cardamom_utils import spiral_grid
+from torchspin._rng import child_seeds as _child_seeds
 from torchspin.constants import BMAGN, GFREE, PLANCK
 from torchspin.stochtraj_diffusion import (
     stochtraj_diffusion, DiffusionPar,
@@ -197,6 +198,14 @@ def cardamom(
         DiffGlobal = np.atleast_1d(np.asarray(DiffGlobal, dtype=np.float64))
     includeGlobalDynamics = DiffGlobal is not None
 
+    # --- Random streams ---
+    # One stream per orientation (local dynamics) and one per orientation (global
+    # dynamics), derived from par.seed: an orientation draws the same trajectories
+    # whether it is simulated alone or in a group, so seeded results do not depend
+    # on the group size, the thread count, or how orientations are distributed.
+    loc_seeds = _child_seeds(par.seed, nOrients, stream=0)
+    glob_seeds = _child_seeds(par.seed, nOrients, stream=1)
+
     # --- Main orientation loop ---
     TDSignals = []
 
@@ -208,6 +217,8 @@ def cardamom(
         # group size: amortises the per-step Python overhead, but large arrays
         # fall out of cache — scale the budget with the available threads
         import torch as _torch
+        # the group size may depend on the thread count: each orientation draws from
+        # its own seed stream (loc_seeds / glob_seeds), so seeded results do not
         budget = min(2e6, 2e5 * _torch.get_num_threads())
         G = max(1, min(nOrients, int(budget // max(1, par.nTraj * nStepsSpin))))
         for g0 in range(0, nOrients, G):
@@ -215,12 +226,17 @@ def cardamom(
             Gk = len(ids)
             if opt.Verbosity >= 1:
                 print(f"  Orientations {ids[0] + 1}-{ids[-1] + 1}/{nOrients}")
-            RTrajLocal, _ = _generate_local_trajectory(par, sys, Diff, dtSpatial, nStepsSpatial, md, repeats=Gk)
+            RTrajLocal, _ = _generate_local_trajectory(par, sys, Diff, dtSpatial, nStepsSpatial, md, repeats=Gk,
+                                                       seeds=None if loc_seeds is None else [loc_seeds[i] for i in ids])
             qLab = np.stack([_euler2quat_active(0.0, gridTheta[i], gridPhi[i]) for i in ids], axis=1)   # (4, Gk)
             qLab_traj = np.repeat(np.repeat(qLab[:, np.newaxis, :], nStepsSpin, axis=1), par.nTraj, axis=2)  # (4, nSteps, Gk*nTraj)
             if includeGlobalDynamics:
+                # start every orientation's block from the spiral grid over nTraj, as the
+                # per-orientation path does (a spiral over Gk*nTraj would make the
+                # result depend on the group size)
                 diff_par = DiffusionPar(dt=dtSpin, nSteps=nStepsSpin, nTraj=Gk * par.nTraj,
-                                        seed=None if par.seed is None else par.seed + 1)
+                                        OriStart=np.tile(_spiral_start(par.nTraj), (1, Gk)),
+                                        seed=None if glob_seeds is None else [glob_seeds[i] for i in ids])
                 _, _, qGlobal = stochtraj_diffusion(DiffGlobal, diff_par)
                 qLab_traj = _quatmult(qLab_traj, qGlobal)
             RLab = _quat_to_rotmat_batch(qLab_traj)
@@ -238,7 +254,8 @@ def cardamom(
 
         # Generate local trajectory
         RTrajLocal, qTrajLocal = _generate_local_trajectory(
-            par, sys, Diff, dtSpatial, nStepsSpatial, md
+            par, sys, Diff, dtSpatial, nStepsSpatial, md,
+            seeds=None if loc_seeds is None else [loc_seeds[iOri]],
         )
 
         # Lab-frame rotation for this orientation
@@ -250,7 +267,7 @@ def cardamom(
         if includeGlobalDynamics:
             diff_par = DiffusionPar(
                 dt=dtSpin, nSteps=nStepsSpin, nTraj=par.nTraj,
-                seed=None if par.seed is None else par.seed + 1,
+                seed=None if glob_seeds is None else [glob_seeds[iOri]],
             )
             _, _, qGlobal = stochtraj_diffusion(DiffGlobal, diff_par)
             # Combine: qLab = qLab * qGlobal (Hamilton product, vectorised)
@@ -346,11 +363,23 @@ def _get_linewidth(sys) -> np.ndarray:
     return lw[:2]
 
 
-def _generate_local_trajectory(par, sys, Diff, dtSpatial, nStepsSpatial, md, repeats: int = 1):
+def _spiral_start(n_traj: int) -> np.ndarray:
+    """(3, n_traj) Euler angles of the spiral starting grid stochtraj_diffusion
+    builds for ``n_traj`` trajectories when no OriStart or potential is given."""
+    pts = np.linspace(-1, 1, n_traj)
+    return np.stack([np.sqrt(np.pi * n_traj) * np.arcsin(pts), np.arccos(pts),
+                     np.sqrt(np.pi * n_traj) * np.arcsin(pts)], axis=0)
+
+
+def _generate_local_trajectory(par, sys, Diff, dtSpatial, nStepsSpatial, md, repeats: int = 1,
+                               seeds=None):
     """Local trajectories for one orientation, or for ``repeats`` orientations at
     once (``repeats`` consecutive blocks of ``par.nTraj`` trajectories with the
-    same starting orientations)."""
-    """Generate local rotational trajectory based on the model."""
+    same starting orientations).
+
+    ``seeds`` holds one seed per block (``repeats`` entries), or is ``None`` for an
+    unseeded run.
+    """
     if par.Model == 'diffusion':
         Potential = getattr(sys, 'Potential', None)
         if Potential is not None:
@@ -365,14 +394,12 @@ def _generate_local_trajectory(par, sys, Diff, dtSpatial, nStepsSpatial, md, rep
                     OriStart = np.tile(OriStart, (1, par.nTraj))
             elif Potential is None:
                 # the spiral starting grid stochtraj_diffusion would build for nTraj
-                pts = np.linspace(-1, 1, par.nTraj)
-                OriStart = np.stack([np.sqrt(np.pi * par.nTraj) * np.arcsin(pts), np.arccos(pts),
-                                     np.sqrt(np.pi * par.nTraj) * np.arcsin(pts)], axis=0)
+                OriStart = _spiral_start(par.nTraj)
             if OriStart is not None:
                 OriStart = np.tile(OriStart, (1, repeats))
         diff_par = DiffusionPar(
             dt=dtSpatial, nSteps=nStepsSpatial, nTraj=par.nTraj * repeats,
-            OriStart=OriStart, seed=par.seed,
+            OriStart=OriStart, seed=seeds,
         )
         _, RTraj, qTraj = stochtraj_diffusion(Diff, diff_par, Potential=Potential)
         return RTraj, qTraj
@@ -389,7 +416,7 @@ def _generate_local_trajectory(par, sys, Diff, dtSpatial, nStepsSpatial, md, rep
         if Orientations is not None:
             Orientations = np.asarray(Orientations, dtype=np.float64)
 
-        jump_par = JumpPar(dt=dtSpatial, nSteps=nStepsSpatial, nTraj=par.nTraj * repeats, seed=par.seed)
+        jump_par = JumpPar(dt=dtSpatial, nSteps=nStepsSpatial, nTraj=par.nTraj * repeats, seed=seeds)
         _, RTraj, qTraj, _ = stochtraj_jump(
             TransRates=TransRates, TransProb=TransProb,
             Orientations=Orientations, par=jump_par,

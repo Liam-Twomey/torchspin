@@ -2,8 +2,8 @@ cff-version: 1.2.0
 message: "If you use torchspin in your research, please cite both torchspin and the upstream EasySpin paper."
 title: "torchspin: Differentiable PyTorch port of EasySpin for EPR spectroscopy"
 type: software
-version: "0.5.0"
-date-released: "2026-10-19"
+version: "0.6.2"
+date-released: "2026-11-08"
 license: MIT
 authors:
   - family-names: "Follmer"

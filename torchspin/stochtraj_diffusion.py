@@ -19,6 +19,7 @@ from typing import Optional
 import numpy as np
 import torch
 
+from torchspin._rng import draw, traj_generators
 from torchspin.rotutils import euler2quat, quat2rotmat, quatmult
 
 
@@ -33,9 +34,14 @@ class DiffusionPar:
     Attributes
     ----------
     seed:
-        Optional integer seed for the random number generator.  When set,
-        the generated trajectory is bit-reproducible across runs.  When
-        ``None`` (default), a fresh non-deterministic generator is used.
+        Optional seed for the random number generator.  When set, the
+        generated trajectory is bit-reproducible across runs.  When ``None``
+        (default), a fresh non-deterministic generator is used.  A sequence
+        of ``B`` seeds splits the ``nTraj`` trajectories into ``B`` equal
+        consecutive blocks with independent streams, so a block draws the
+        same numbers whether it is generated alone or together with others
+        (used by cardamom to keep seeded results independent of how
+        orientations are grouped).
     """
     dt: Optional[float] = None        # time step (s)
     nSteps: Optional[int] = None      # number of steps
@@ -43,7 +49,7 @@ class DiffusionPar:
     tMax: Optional[float] = None      # total simulation time (s)
     OriStart: Optional[np.ndarray] = None  # (3, nTraj) Euler angles
     Integrator: str = 'Euler-Maruyama'     # or 'Leimkuhler-Matthews'
-    seed: Optional[int] = None             # RNG seed (None = non-deterministic)
+    seed: object = None                    # int, SeedSequence, or a sequence of per-block seeds (None = non-deterministic)
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +103,7 @@ def stochtraj_diffusion(
     nTraj = par.nTraj
 
     # --- Seeded RNG (reproducibility per DiffusionPar.seed) ---
-    _rng = np.random.default_rng(par.seed)
+    _gens = traj_generators(par.seed, nTraj)
 
     # --- Resolve time parameters ---
     if dt is None and par.tMax is not None and nSteps is not None:
@@ -147,11 +153,11 @@ def stochtraj_diffusion(
             OriStart = np.stack([gridPhi, gridTheta, gridPsi], axis=0)
         else:
             # Random starting orientations for potential case
-            OriStart = np.stack([
-                _rng.uniform(0, 2 * np.pi, nTraj),
-                np.arccos(_rng.uniform(-1, 1, nTraj)),
-                _rng.uniform(0, 2 * np.pi, nTraj),
-            ], axis=0)
+            OriStart = draw(_gens, lambda g, n: np.stack([
+                g.uniform(0, 2 * np.pi, n),
+                np.arccos(g.uniform(-1, 1, n)),
+                g.uniform(0, 2 * np.pi, n),
+            ], axis=0), axis=1)
 
     # Convert starting Euler angles → quaternions
     q0 = np.zeros((4, nTraj), dtype=np.float64)
@@ -165,7 +171,7 @@ def stochtraj_diffusion(
 
     # --- Propagate ---
     qTraj = _propagate(qTraj, Diff, dt, nSteps, nTraj,
-                       par.Integrator, LMK, lam, interpGrad, rng=_rng)
+                       par.Integrator, LMK, lam, interpGrad, gens=_gens)
 
     # Permute to (4, nSteps, nTraj) — matches MATLAB output convention
     qTraj = np.transpose(qTraj, (0, 2, 1))  # (4, nSteps, nTraj)
@@ -192,12 +198,13 @@ def _propagate(
     lam: np.ndarray | None,
     interpGrad: object | None,
     rng: Optional[np.random.Generator] = None,
+    gens: Optional[list] = None,
 ) -> np.ndarray:
     """Euler-Maruyama quaternion propagation (Eq. 61 in Sezer 2008)."""
     # Pre-compute random angular steps (seeded via rng if provided)
-    if rng is None:
-        rng = np.random.default_rng()
-    randns = rng.standard_normal((3, nTraj, nSteps))
+    if gens is None:
+        gens = [(rng if rng is not None else np.random.default_rng(), nTraj)]
+    randns = draw(gens, lambda g, n: g.standard_normal((3, n, nSteps)), axis=1)
     scale = np.sqrt(2.0 * Diff * dt)[:, np.newaxis, np.newaxis]
 
     if integrator == 'Leimkuhler-Matthews':

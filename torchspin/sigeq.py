@@ -66,6 +66,6 @@ def sigeq(
     sigma = (sigma + sigma.conj().T) / 2
 
     if polarization:
-        sigma = sigma - torch.eye(N, dtype=torch.complex128) / N
+        sigma = sigma - torch.eye(N, dtype=sigma.dtype, device=sigma.device) / N
 
     return sigma

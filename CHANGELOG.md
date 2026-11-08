@@ -17,6 +17,17 @@ Bug fixes found while running the GPU tests on a CUDA host.
   (`_preselect_pairs`) built its rate and mask tensors on the CPU, so every
   `Options(device='cuda')` call aborted before simulating. The CPU-vs-CUDA
   consistency tests catch this, but they only run on a GPU host.
+- **pepper on CUDA ran out of memory on dense strain grids.** Batched CUDA
+  eigendecompositions went to cuSOLVER in a single call. The solver reserves
+  about 1–2 MB of workspace per matrix whatever its size, so strain broadening
+  (one 6×6 diagonalization per resonance) asked for tens of GB. CUDA batches
+  are now split into chunks that fit in half the free GPU memory.
+- **pepper on CUDA was up to 25× slower than on CPU.** The resonance search
+  finds cubic roots as eigenvalues of 3×3 companion matrices. On CUDA, torch
+  computes general (non-Hermitian) eigenvalues one matrix at a time with a
+  host sync each, hundreds of thousands per call: 34.7 s for the Mn(II)
+  matrix workload against 1.4 s on 32 CPU threads. These small solves now run
+  as one batched CPU call, the same LAPACK routine the CPU path uses.
 - **pepper was not thread-safe.** The slot keys of the matrix method were kept
   in a function attribute shared by the whole process. With concurrent pepper
   calls, such as `esfit(..., FitOptions(workers='threads'))` or any user thread

@@ -285,3 +285,31 @@ def test_cuda_fallback_on_cpu_only_install():
         assert any('CUDA' in str(x.message) for x in w), (
             "Expected RuntimeWarning mentioning CUDA"
         )
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason=SKIP_REASON)
+def test_cuda_eigh_large_batch_is_chunked():
+    """A batch whose cuSOLVER workspace would exceed GPU memory (about 1-2 MB per
+    matrix) runs in chunks and matches the CPU result."""
+    from torchspin import _linalg
+    free, _ = torch.cuda.mem_get_info()
+    nb = int(min(free // (1 * 2**20) + 1024, 120_000))     # above what one call could hold
+    torch.manual_seed(2)
+    A = torch.randn(nb, 6, 6, dtype=torch.complex128)
+    H = A + A.conj().transpose(-1, -2)
+    w_gpu = _linalg.eigvalsh(H.cuda())
+    w_cpu = torch.linalg.eigvalsh(H)
+    assert _max_rel_diff(w_cpu, w_gpu) < 1e-12
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason=SKIP_REASON)
+def test_pepper_cuda_strain_dense_grid():
+    """Strain broadening on a dense grid: every resonance's strain width needs an eigh at
+    B0, which used to be one unchunked CUDA batch and ran out of memory."""
+    sys = SpinSystem(S=[0.5], g=[2.008, 2.006, 2.003], Nucs='14N', A=[[20, 20, 85]],
+                     gStrain=[[0.003, 0.002, 0.001]], HStrain=[10, 10, 30], lwpp=[0.3, 0])
+    exp = Experiment(mwFreq=9.5, Range=[330, 350], nPoints=2048)
+    _, spc_cpu = pepper(sys, exp, Options(Verbosity=0, GridSize=[61, 4], device='cpu'))
+    _, spc_gpu = pepper(sys, exp, Options(Verbosity=0, GridSize=[61, 4], device='cuda'))
+    assert _max_rel_diff(spc_cpu, spc_gpu) < 1e-9
+

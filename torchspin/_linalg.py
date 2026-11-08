@@ -24,6 +24,8 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import torch
 
+from torchspin.parallel import inner_threads
+
 _MIN_BATCH = 32            # below this the pool overhead is not worth it
 _CUSOLVER_BATCHED_MAX = 32  # syevjBatched limit
 _executors: dict = {}
@@ -50,7 +52,9 @@ def _executor(w: int) -> ThreadPoolExecutor:
 
 
 def _pool_size(nb: int) -> int:
-    return max(1, min(torch.get_num_threads(), nb // 8))
+    # inner_threads() is torch.get_num_threads(), or less inside a
+    # torchspin.parallel.thread_budget (e.g. in an esfit worker)
+    return max(1, min(inner_threads(), nb // 8))
 
 
 def _one(fn, np_fn, A: torch.Tensor, allow_numpy: bool = True):
@@ -207,7 +211,7 @@ def pool_map(fn, items: list):
     concurrently instead of contending.  Falls back to a plain map for one item
     or one thread.
     """
-    w = min(torch.get_num_threads(), len(items))
+    w = min(inner_threads(), len(items))
     if w <= 1:
         return [fn(it) for it in items]
     with _threads_lock:

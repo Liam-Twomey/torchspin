@@ -49,6 +49,7 @@ Issues = "https://github.com/follmerlab/torchspin/issues"
 [project.optional-dependencies]
 plot = ["matplotlib>=3.6"]
 fit = ["cloudpickle>=2.0"]          # process-pool esfit with notebook-defined models
+hpc = ["threadpoolctl>=3.1", "cloudpickle>=2.0"]   # BLAS thread caps (torchspin.parallel.thread_budget(blas=True)), process pools
 gui = ["ipywidgets>=7.6", "matplotlib>=3.6", "ipympl>=0.9", "ipython>=7", "cloudpickle>=2.0"]   # interactive fitting panel (torchspin.fitgui)
 test = ["pytest>=7", "pytest-cov", "matplotlib>=3.6", "cloudpickle>=2.0", "ipywidgets>=7.6"]
 dev = ["pytest>=7", "pytest-cov", "build", "twine", "matplotlib>=3.6", "cloudpickle>=2.0", "ipywidgets>=7.6"]

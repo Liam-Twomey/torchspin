@@ -1537,18 +1537,9 @@ def _get_pool(n_proc: int, per: int):
     # the children inherit the environment at spawn: cap the BLAS/OpenMP thread
     # pools of numpy/scipy/torch per worker (otherwise every worker starts one
     # thread per core and the pool thrashes)
-    import os
-    saved = {k: os.environ.get(k) for k in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS')}
-    for k in saved:
-        os.environ[k] = str(per)
-    try:
+    from torchspin.parallel import native_thread_env
+    with native_thread_env(per):
         pool = mp.get_context('spawn').Pool(n_proc, initializer=_pool_init, initargs=(per,))
-    finally:
-        for k, v in saved.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
     _POOL = (n_proc, per, pool)
     return pool
 
@@ -1572,11 +1563,20 @@ class _CloudPickled:
         return {'_blob': self._blob, '_fn': None}
 
 
+def _threads_per_worker(n_workers: int) -> int:
+    """Inner threads per outer worker so that workers × threads fits the core budget."""
+    import torch as _torch
+    from torchspin.parallel import cpu_budget
+    total = min(_torch.get_num_threads(), cpu_budget())
+    return max(1, total // max(1, n_workers))
+
+
 def _resolve_workers(n_workers, n: int) -> int:
-    """'auto' → all cores (capped by the population size); ints pass through."""
+    """'auto' → every core this process may use (affinity / SLURM aware, see
+    torchspin.parallel.cpu_budget), capped by the population size; ints pass through."""
     if isinstance(n_workers, str):
-        import os
-        return max(1, min(os.cpu_count() or 1, n))
+        from torchspin.parallel import cpu_budget
+        return max(1, min(cpu_budget(), n))
     return int(n_workers or 1)
 
 
@@ -1623,9 +1623,8 @@ def _eval_population(
                 except Exception:
                     fn = None
         if fn is not None:
-            import torch as _torch
             n_proc = min(n_workers, n)
-            per = max(1, _torch.get_num_threads() // n_proc)
+            per = _threads_per_worker(n_proc)
             pool = _get_pool(n_proc, per)
             step = n if not tracker.active else max(2 * n_proc, int(tracker.options.progress_every or 0))
             out = []
@@ -1646,8 +1645,18 @@ def _eval_population(
             import warnings
             warnings.warn("esfit: objective is not picklable and cloudpickle is not installed; using a thread pool")
     from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=min(n_workers, n)) as ex:
-        F = np.array(list(ex.map(raw, list(X))))
+    from torchspin.parallel import thread_budget
+    n_thr = min(n_workers, n)
+    per = _threads_per_worker(n_thr)
+
+    def _budgeted(x):
+        # each worker's inner pools (eigh, accumulation) get their share of the
+        # budget instead of all cores each
+        with thread_budget(per):
+            return raw(x)
+
+    with ThreadPoolExecutor(max_workers=n_thr) as ex:
+        F = np.array(list(ex.map(_budgeted, list(X))))
     tracker.record_batch(X, F)
     return F
 

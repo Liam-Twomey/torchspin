@@ -198,7 +198,10 @@ def resfields_batch(
             comp = torch.zeros(int(cubic.sum()), 3, 3, dtype=rdtype, device=dev)
             comp[:, 1, 0] = 1.0; comp[:, 2, 1] = 1.0
             comp[:, 0, 0] = -C2n[cubic] / C3n[cubic]; comp[:, 0, 1] = -C1n[cubic] / C3n[cubic]; comp[:, 0, 2] = -C0n[cubic] / C3n[cubic]
-            ev = torch.linalg.eigvals(comp)
+            # torch computes general (non-Hermitian) eigenvalues on CUDA one matrix at a
+            # time with a host sync each (hundreds of thousands per pepper call); one
+            # batched CPU call runs the same LAPACK routine as the CPU path
+            ev = torch.linalg.eigvals(comp.cpu()).to(dev) if comp.is_cuda else torch.linalg.eigvals(comp)
             real = ev.imag.abs() < 1e-7 * (1 + ev.real.abs())
             roots[cubic] = torch.where(real, ev.real, torch.full_like(ev.real, float('nan')))
         quad = (~cubic) & (C2n.abs() > 1e-10)

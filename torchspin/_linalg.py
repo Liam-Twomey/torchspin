@@ -28,6 +28,11 @@ from torchspin.parallel import inner_threads
 
 _MIN_BATCH = 32            # below this the pool overhead is not worth it
 _CUSOLVER_BATCHED_MAX = 32  # syevjBatched limit
+# Workspace the batched CUDA solver reserves per matrix. Measured on torch 2.14 / CUDA 13:
+# about 1.1-1.5 MB per matrix at every size from 6x6 to 32x32, so an unchunked batch of
+# 32768 6x6 matrices asked for 37 GB. Use the upper end, with headroom.
+_CUDA_WS_PER_MATRIX = 2 * 2**20
+_CUDA_MIN_CHUNK = 256
 _executors: dict = {}
 
 # torch.set_num_threads is process-global, so the save/set/restore in _pooled and
@@ -167,6 +172,30 @@ class _EighDegenerateSafe(torch.autograd.Function):
         return 0.5 * (gH + gH.conj().transpose(-2, -1))
 
 
+def _cuda_chunk(nb: int, device) -> int:
+    """Matrices per batched CUDA eigensolver call that fit in half the free memory."""
+    try:
+        free, _ = torch.cuda.mem_get_info(device)
+    except Exception:
+        free = 4 * 2**30
+    return max(_CUDA_MIN_CHUNK, min(nb, int(0.5 * free) // _CUDA_WS_PER_MATRIX))
+
+
+def _cuda_chunked(fn, H: torch.Tensor):
+    """Run a batched CUDA eigensolver in memory-bounded chunks (see _CUDA_WS_PER_MATRIX)."""
+    n = H.shape[-1]
+    nb = H.shape[:-2].numel()
+    chunk = _cuda_chunk(nb, H.device)
+    if chunk >= nb:
+        return fn(H)
+    flat = H.reshape(nb, n, n)
+    parts = [fn(flat[i:i + chunk]) for i in range(0, nb, chunk)]
+    if isinstance(parts[0], tuple):
+        return (torch.cat([p[0] for p in parts]).reshape(*H.shape[:-1]),
+                torch.cat([p[1] for p in parts]).reshape(H.shape))
+    return torch.cat(parts).reshape(*H.shape[:-1])
+
+
 def eigh(H: torch.Tensor):
     """Batched ``torch.linalg.eigh`` (see module docstring); on the autograd graph
     the backward is the degeneracy-safe variant (:class:`_EighDegenerateSafe`)."""
@@ -177,7 +206,7 @@ def eigh(H: torch.Tensor):
     nb = H.shape[:-2].numel()
     if H.is_cuda:
         if H.shape[-1] <= _CUSOLVER_BATCHED_MAX or nb < 4:
-            return _safe_eigh(H)
+            return _cuda_chunked(_safe_eigh, H)
         E, V = eigh(H.cpu())
         return E.to(H.device), V.to(H.device)
     res = _pooled(_safe_eigh, H)
@@ -195,7 +224,7 @@ def eigvalsh(H: torch.Tensor):
     nb = H.shape[:-2].numel()
     if H.is_cuda:
         if H.shape[-1] <= _CUSOLVER_BATCHED_MAX or nb < 4:
-            return _safe_eigvalsh(H)
+            return _cuda_chunked(_safe_eigvalsh, H)
         return eigvalsh(H.cpu()).to(H.device)
     res = _pooled(_safe_eigvalsh, H)
     if isinstance(res, torch.Tensor):

@@ -18,6 +18,16 @@ Work toward v1.0 performance on branch `dev/v1-acceleration`; see
 
 ### Added
 
+- **Parallel finite differences in esfit.** With `FitOptions(n_workers > 1)`
+  (or `'auto'`), the independent finite-difference probes now run in the worker
+  pool: levmar's initial Jacobian (n + 1 calls), every trf Jacobian and
+  L-BFGS-B gradient (n calls each, through SciPy's `workers=`, SciPy ≥ 1.16)
+  and the uncertainty Jacobian (2n calls). Probe points, recording order and
+  evaluation counts are unchanged, so a deterministic model gives the same fit.
+  `n_workers` used to apply to population methods only; the default `1` keeps
+  everything sequential. On an 8-thread laptop the 4-parameter pepper fit
+  benchmarks took 1.47 → 1.02 s (levmar) and 1.55 → 0.84 s (trf).
+  The uncertainty Jacobian no longer evaluates an unused base point.
 - `torchspin.parallel`: one CPU thread budget shared by esfit's worker pools and
   the inner pools of `torchspin._linalg` (batched eigendecomposition, chunked
   accumulation). It provides:

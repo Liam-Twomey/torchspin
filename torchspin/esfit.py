@@ -115,10 +115,9 @@ class FitOptions:
         ``interrupted=False``; a stop or interrupt returns the best point so
         far with ``interrupted=True``. ``FitResult.n_iterations`` is SciPy's
         Jacobian-evaluation count (one per trust-region iteration).
-        TRF is a local optimization method, not a CPU-acceleration feature:
-        it runs sequentially in the calling process. Simulation threading
-        (``torch.set_num_threads``) and the population-worker parallelism of
-        ``n_workers`` (population methods only) are separate and unaffected.
+        TRF is a local optimization method: its iterations run one after
+        another, but with ``n_workers > 1`` the finite-difference probes of
+        each Jacobian are evaluated concurrently (SciPy >= 1.16).
     """
     method: str = 'simplex'
     autoscale: str = 'lsq'
@@ -158,11 +157,15 @@ class FitOptions:
     trf_diff_step: Optional[float] = None
     trf_x_scale: Union[str, float, np.ndarray] = 'jac'
     trf_gradient_tol: float = 1e-7
-    # Parallelism for population-based methods (swarm, genetic, montecarlo,
-    # grid, global). n_workers=1 is sequential; an int > 1 or 'auto' (one per
-    # core) evaluates the population in a spawned process pool with one torch
-    # thread per worker (workers='auto'|'processes'; 'threads' forces a thread
-    # pool, which gains little because the forward model holds the GIL).
+    # Parallel model evaluations. Population methods (swarm, genetic,
+    # montecarlo, grid, global) evaluate each population concurrently; levmar,
+    # trf, lbfgsb and the uncertainty estimate evaluate the independent
+    # finite-difference probes of each Jacobian or gradient concurrently (trf
+    # and lbfgsb need SciPy >= 1.16; older SciPy runs them sequentially).
+    # n_workers=1 is sequential; an int > 1 or 'auto' (one per core) uses a
+    # spawned process pool with the cores split between the workers
+    # (workers='auto'|'processes'; 'threads' forces a thread pool, which gains
+    # little because the forward model holds the GIL).
     # Models defined in a notebook cell need cloudpickle (pip install
     # cloudpickle) to reach the workers; otherwise a thread pool is used.
     n_workers: Union[int, str] = 1
@@ -1156,18 +1159,29 @@ def _optimize_lbfgsb(
     
     lb, ub = bounds
     tracker = _tracker_of(objective_fn)
+    fun = objective_fn
+    opts = {
+        'maxiter': options.max_iter,
+        'ftol': options.tol_fun,
+        'gtol': 1e-5,
+        'disp': options.verbosity > 0
+    }
+    # the n forward-difference probes of each gradient are independent
+    mapper = _scipy_map(options, tracker, _scalar, 2 * len(p0))
+    if mapper is not None:
+        if _scipy_takes_workers('lbfgsb'):
+            raw = objective_fn.raw if isinstance(objective_fn, _TrackedObjective) else objective_fn
+            fun = _ParentRecorded(raw, tracker, _scalar)
+            opts['workers'] = mapper
+        else:
+            warnings.warn("esfit: parallel L-BFGS-B gradients need SciPy >= 1.16; evaluating them sequentially")
     result = minimize(
-        objective_fn,
+        fun,
         p0,
         method='L-BFGS-B',
         bounds=Bounds(lb, ub),
         callback=lambda *a, **k: tracker.iteration(tracker.iter, None),
-        options={
-            'maxiter': options.max_iter,
-            'ftol': options.tol_fun,
-            'gtol': 1e-5,
-            'disp': options.verbosity > 0
-        }
+        options=opts
     )
     return result
 
@@ -1580,69 +1594,75 @@ def _resolve_workers(n_workers, n: int) -> int:
     return int(n_workers or 1)
 
 
-def _eval_population(
-    objective_fn: Callable,
-    X: np.ndarray,
-    n_workers=1,
-    workers: str = 'auto',
-) -> np.ndarray:
-    """Evaluate ``objective_fn`` on each row of ``X``.
+def _ship(raw: Callable):
+    """``raw`` in a form a spawned worker can run, or None if it cannot be sent.
 
-    ``n_workers > 1`` (or ``'auto'`` = one per core) evaluates the rows
-    concurrently.  ``workers='processes'`` uses a spawned process pool with one
-    torch thread per worker — the effective option for torchspin forward models,
-    whose Python-level work holds the GIL.  The objective is pickled by
-    value through ``cloudpickle`` (so functions defined in a notebook cell and
-    closures work); without cloudpickle, only objectives from importable modules
-    can be sent by reference and the rest fall back to a thread pool.
-    ``workers='threads'`` forces the thread pool.
+    By value through cloudpickle whenever possible: pickling by reference succeeds
+    for functions defined in a notebook's __main__, but the spawned worker cannot
+    resolve them, dies before registering the task and the map hangs forever.
+    By reference only for functions from importable modules.
+    """
+    try:
+        return _CloudPickled(raw)
+    except Exception:
+        import pickle
+        mod = getattr(raw, '__module__', None)
+        if mod not in (None, '__main__', '__mp_main__'):
+            try:
+                pickle.dumps(raw)
+                return raw
+            except Exception:
+                return None
+    return None
+
+
+def _map_points(raw: Callable, X, n_workers, workers: str = 'auto',
+                on_chunk: Optional[Callable] = None, step: Optional[int] = None,
+                size_hint: Optional[int] = None) -> list:
+    """``[raw(x) for x in X]``, evaluated concurrently, results in input order.
+
+    ``workers='auto'|'processes'`` uses the cached spawn pool (cores split between
+    the workers, see :func:`_threads_per_worker`); ``'threads'``, or an objective
+    that cannot be sent to a process, uses a thread pool. ``on_chunk(Xc, Fc)`` runs
+    in this process after every chunk of ``step`` points (default: all at once).
+    ``size_hint`` is the largest batch the caller will send: with ``'auto'`` the
+    process pool is sized for it, so batches of different sizes within one fit
+    reuse one pool instead of respawning it.
     """
     global _POOL
-    n = X.shape[0]
-    n_workers = _resolve_workers(n_workers, n)
+    X = list(X)
+    n = len(X)
+    if n <= 1:
+        n_workers = 1
+    else:
+        n_workers = _resolve_workers(n_workers, max(n, int(size_hint or 0)))
     if n_workers <= 1 or n <= 1:
-        return np.array([objective_fn(x) for x in X])
-    # the progress tracker stays in this process: workers get the raw objective and
-    # the parent merges each chunk of results (count, best-so-far, stop checks)
-    raw = objective_fn.raw if isinstance(objective_fn, _TrackedObjective) else objective_fn
-    tracker = _tracker_of(objective_fn)
+        out = [raw(x) for x in X]
+        if on_chunk is not None:
+            on_chunk(X, out)
+        return out
     if workers in ('auto', 'processes'):
-        # Ship the objective by value (cloudpickle) whenever possible: pickling by
-        # reference succeeds for functions defined in a notebook's __main__ but the
-        # spawned worker cannot resolve them, dies before registering the task and
-        # the map hangs forever.  Reference pickling only for importable modules.
-        fn = None
-        try:
-            fn = _CloudPickled(raw)
-        except Exception:
-            import pickle
-            mod = getattr(raw, '__module__', None)
-            if mod not in (None, '__main__', '__mp_main__'):
-                try:
-                    pickle.dumps(raw); fn = raw
-                except Exception:
-                    fn = None
+        fn = _ship(raw)
         if fn is not None:
-            n_proc = min(n_workers, n)
-            per = _threads_per_worker(n_proc)
-            pool = _get_pool(n_proc, per)
-            step = n if not tracker.active else max(2 * n_proc, int(tracker.options.progress_every or 0))
+            n_proc = n_workers if size_hint else min(n_workers, n)
+            pool = _get_pool(n_proc, _threads_per_worker(n_proc))
+            step = n if not step else max(1, int(step))
             out = []
             try:
                 for s in range(0, n, step):
-                    fc = pool.map(fn, list(X[s:s + step]), chunksize=1)
+                    fc = pool.map(fn, X[s:s + step], chunksize=1)
                     out.extend(fc)
-                    tracker.record_batch(X[s:s + step], fc)
+                    if on_chunk is not None:
+                        on_chunk(X[s:s + step], fc)
             except (KeyboardInterrupt, _StopFit):
-                # do not leave the cached pool grinding the interrupted generation
+                # do not leave the cached pool grinding the interrupted batch
                 try:
                     pool.terminate()
                 finally:
                     _POOL = None
                 raise
-            return np.array(out)
+            return out
         if workers == 'processes':
-            import warnings
             warnings.warn("esfit: objective is not picklable and cloudpickle is not installed; using a thread pool")
     from concurrent.futures import ThreadPoolExecutor
     # No per-worker thread_budget here. A smaller inner budget makes _linalg skip its
@@ -1652,9 +1672,118 @@ def _eval_population(
     # the cores (measured 2.1x slower at 8 threads for the matrix method). The process
     # backend is the one that partitions cores.
     with ThreadPoolExecutor(max_workers=min(n_workers, n)) as ex:
-        F = np.array(list(ex.map(raw, list(X))))
-    tracker.record_batch(X, F)
-    return F
+        out = list(ex.map(raw, X))
+    if on_chunk is not None:
+        on_chunk(X, out)
+    return out
+
+
+def _eval_population(
+    objective_fn: Callable,
+    X: np.ndarray,
+    n_workers=1,
+    workers: str = 'auto',
+) -> np.ndarray:
+    """Evaluate ``objective_fn`` on each row of ``X``.
+
+    ``n_workers > 1`` (or ``'auto'`` = one per core) evaluates the rows
+    concurrently.  ``workers='processes'`` uses a spawned process pool with the
+    cores split between the workers — the effective option for torchspin forward
+    models, whose Python-level work holds the GIL.  The objective is pickled by
+    value through ``cloudpickle`` (so functions defined in a notebook cell and
+    closures work); without cloudpickle, only objectives from importable modules
+    can be sent by reference and the rest fall back to a thread pool.
+    ``workers='threads'`` forces the thread pool.
+    """
+    n = X.shape[0]
+    if _resolve_workers(n_workers, n) <= 1 or n <= 1:
+        return np.array([objective_fn(x) for x in X])
+    # the progress tracker stays in this process: workers get the raw objective and
+    # the parent merges each chunk of results (count, best-so-far, stop checks)
+    raw = objective_fn.raw if isinstance(objective_fn, _TrackedObjective) else objective_fn
+    tracker = _tracker_of(objective_fn)
+    step = None
+    if tracker.active and workers in ('auto', 'processes'):
+        n_proc = min(_resolve_workers(n_workers, n), n)
+        step = max(2 * n_proc, int(tracker.options.progress_every or 0))
+    return np.array(_map_points(raw, list(X), n_workers, workers, on_chunk=tracker.record_batch, step=step))
+
+
+class _ParentRecorded:
+    """A residual or objective function SciPy may evaluate in worker processes.
+
+    Calls made directly by the optimizer, in the thread that built the wrapper,
+    are recorded in the tracker. Finite-difference probes that SciPy hands to the
+    ``workers`` map (see :func:`_scipy_map`) are recorded there instead, so every
+    evaluation is counted once. The tracker never leaves this process.
+    """
+
+    def __init__(self, raw: Callable, tracker: '_FitProgress', to_f: Callable):
+        import threading
+        self.raw, self.tracker, self.to_f = raw, tracker, to_f
+        self._owner = threading.get_ident()
+
+    def __call__(self, x):
+        out = self.raw(x)
+        if self.tracker is not None:
+            import threading
+            if threading.get_ident() == self._owner:
+                self.tracker.record(x, self.to_f(out))
+        return out
+
+    def __getstate__(self):
+        return {'raw': self.raw, 'tracker': None, 'to_f': self.to_f, '_owner': None}
+
+
+def _scipy_map(options: 'FitOptions', tracker: '_FitProgress', to_f: Callable, size_hint: int):
+    """A ``workers`` map for SciPy's finite differences, or None to stay sequential."""
+    if _resolve_workers(options.n_workers, 2) <= 1:
+        return None
+
+    def mapper(fn, iterable):
+        def record(Xc, Fc):
+            tracker.record_batch(Xc, [to_f(f) for f in Fc])
+        return _map_points(fn, list(iterable), options.n_workers, options.workers, on_chunk=record,
+                           size_hint=size_hint)
+    return mapper
+
+
+def _scipy_takes_workers(solver: str) -> bool:
+    import inspect
+    try:
+        if solver == 'trf':
+            return 'workers' in inspect.signature(least_squares).parameters
+        from scipy.optimize._lbfgsb_py import _minimize_lbfgsb
+        return 'workers' in inspect.signature(_minimize_lbfgsb).parameters
+    except Exception:
+        return False
+
+
+def _scalar(f) -> float:
+    """A scalar objective value; SciPy's wrappers may hand back a 1-element array."""
+    return float(np.asarray(f, dtype=float).ravel()[0])
+
+
+def _rms(r) -> float:
+    r = np.asarray(r, dtype=float).ravel()
+    return float(np.sqrt(np.mean(r * r)))
+
+
+def _finite_residuals(p, resid_fn):
+    r = np.asarray(resid_fn(p), dtype=float).ravel()
+    if not np.all(np.isfinite(r)):
+        raise ValueError('residuals contain NaN or Inf')
+    return r
+
+
+def _bounded_residuals(pvec, lb, ub, data, model_wrapper, param_handler, options):
+    """Residual vector at ``pvec`` clipped to the bounds (picklable for worker pools)."""
+    return compute_residuals(np.clip(pvec, lb, ub), data, model_wrapper, param_handler, options)[0]
+
+
+def _plain_residuals(pvec, data, model_wrapper, param_handler, options):
+    """Residual vector at ``pvec`` (picklable for worker pools)."""
+    return compute_residuals(pvec, data, model_wrapper, param_handler, options)[0]
 
 
 def _optimize_grid(
@@ -2056,8 +2185,8 @@ def _optimize_levmar(
     n_eval = [0]
     tracker = _tracker_of(objective_fn)
 
-    def funeval(x):
-        f = np.asarray(resid_fn(untransform(x)), dtype=float).ravel()
+    def finish(x, f):
+        f = np.asarray(f, dtype=float).ravel()
         n_eval[0] += 1
         if not np.all(np.isfinite(f)):
             raise ValueError('residuals contain NaN or Inf')
@@ -2067,13 +2196,28 @@ def _optimize_levmar(
         tracker.record(untransform(x), np.sqrt(F / max(1, f.size)))
         return F, f
 
+    def funeval(x):
+        return finish(x, resid_fn(untransform(x)))
+
     x = np.clip(transform(np.asarray(p0, dtype=float)), xlb, xub)
-    F, f = funeval(x)
-    J = np.zeros((f.size, n))
+    # the start point and its n forward-difference probes are independent: with
+    # n_workers > 1 they are evaluated concurrently, then recorded in order
+    probes = []
     for i in range(n):
         x1 = x.copy(); x1[i] += delta
-        _, f1 = funeval(x1)
-        J[:, i] = (f1 - f) / delta
+        probes.append(x1)
+    if _resolve_workers(options.n_workers, n + 1) > 1:
+        # pool sized for the largest batch of the fit (the 2n-probe uncertainty Jacobian)
+        R = _map_points(resid_fn, [untransform(xi) for xi in [x] + probes], options.n_workers, options.workers,
+                        size_hint=2 * n)
+        F, f = finish(x, R[0])
+        fp = [finish(xi, r)[1] for xi, r in zip(probes, R[1:])]
+    else:
+        F, f = funeval(x)
+        fp = [funeval(xi)[1] for xi in probes]
+    J = np.zeros((f.size, n))
+    for i in range(n):
+        J[:, i] = (fp[i] - f) / delta
     _warn_dead_jacobian_columns(J, 'levmar')
     g = J.T @ f
     norm_g = np.linalg.norm(g, ord=np.inf)
@@ -2156,19 +2300,21 @@ def _optimize_trf(
     lb, ub = (np.asarray(b, dtype=float) for b in bounds)
     tracker = _tracker_of(objective_fn)
 
-    def residual(p):
-        r = np.asarray(resid_fn(p), dtype=float).ravel()
-        if not np.all(np.isfinite(r)):
-            raise ValueError('residuals contain NaN or Inf')
-        # sqrt(mean(r^2)) is exactly the RMSD compute_residuals reports
-        tracker.record(p, float(np.sqrt(np.mean(r * r))))
-        return r
-
+    import functools
+    # sqrt(mean(r^2)) is exactly the RMSD compute_residuals reports
+    residual = _ParentRecorded(functools.partial(_finite_residuals, resid_fn=resid_fn), tracker, _rms)
+    kw = {}
+    mapper = _scipy_map(options, tracker, _rms, 2 * len(p0))
+    if mapper is not None:
+        if _scipy_takes_workers('trf'):
+            kw['workers'] = mapper
+        else:
+            warnings.warn("esfit: parallel trf Jacobians need SciPy >= 1.16; evaluating them sequentially")
     x0 = np.clip(np.asarray(p0, dtype=float), lb, ub)
     fit = least_squares(residual, x0, bounds=(lb, ub), method='trf',
                         x_scale=options.trf_x_scale, diff_step=options.trf_diff_step,
                         max_nfev=int(options.max_iter), ftol=options.tol_fun, xtol=options.tol_x,
-                        gtol=options.trf_gradient_tol)
+                        gtol=options.trf_gradient_tol, **kw)
     # SciPy reports no iteration count for 'trf'; each trust-region iteration
     # evaluates the Jacobian once, so njev is the closest measure.
     n_iter = fit.njev if getattr(fit, 'njev', None) is not None else fit.nfev
@@ -2228,15 +2374,16 @@ def _estimate_uncertainties(
         'cov': covariance matrix
         'corr': correlation matrix
     """
-    # Define residual function
-    def residuals_fn(pvec):
-        residuals, _, _ = compute_residuals(
-            pvec, data, model_wrapper, param_handler, options
-        )
-        return residuals
-    
-    # Compute Jacobian via finite differences
-    J_all = _jacobian_finite_diff(residuals_fn, pfit)
+    # Residual function: a partial of a module-level function on a copy of the
+    # options without the in-process callables, so it pickles for the worker pool
+    import functools
+    from dataclasses import replace as _replace
+    residuals_fn = functools.partial(
+        _plain_residuals, data=data, model_wrapper=model_wrapper, param_handler=param_handler,
+        options=_replace(options, progress=None, stop_when=None, callback=None))
+
+    # Compute Jacobian via finite differences (probes concurrent with n_workers > 1)
+    J_all = _jacobian_finite_diff(residuals_fn, pfit, n_workers=options.n_workers, workers=options.workers)
     # A parameter the residuals do not depend on would get sigma = 0 from pinv,
     # which reads as perfectly determined. Report it as undetermined (nan)
     # instead and leave it out of the covariance of the others.
@@ -2302,22 +2449,35 @@ def _estimate_uncertainties(
 def _jacobian_finite_diff(
     fn: Callable,
     x: np.ndarray,
-    eps: float = 1e-7
+    eps: float = 1e-7,
+    n_workers=1,
+    workers: str = 'auto',
 ) -> np.ndarray:
-    """Compute Jacobian via central finite differences."""
+    """Compute Jacobian via central finite differences.
+
+    The 2n probes are independent; with ``n_workers > 1`` they are evaluated
+    concurrently (see :func:`_map_points`).
+    """
     n_params = len(x)
-    f0 = fn(x)
-    n_data = len(f0)
-    J = np.zeros((n_data, n_params))
-    
+    steps, plus, minus = [], [], []
     for i in range(n_params):
         x_plus = x.copy()
         x_minus = x.copy()
         step = eps * max(abs(x[i]), 1.0)
         x_plus[i] += step
         x_minus[i] -= step
-        J[:, i] = (fn(x_plus) - fn(x_minus)) / (2*step)
-    
+        steps.append(step); plus.append(x_plus); minus.append(x_minus)
+    if _resolve_workers(n_workers, 2 * n_params) > 1:
+        R = _map_points(fn, plus + minus, n_workers, workers, size_hint=2 * n_params)
+        fp, fm = R[:n_params], R[n_params:]
+    else:
+        fp, fm = [], []
+        for i in range(n_params):
+            fp.append(fn(plus[i])); fm.append(fn(minus[i]))
+    n_data = len(np.asarray(fp[0]).ravel())
+    J = np.zeros((n_data, n_params))
+    for i in range(n_params):
+        J[:, i] = (np.asarray(fp[i]) - np.asarray(fm[i])) / (2 * steps[i])
     return J
 
 
@@ -2517,9 +2677,10 @@ def esfit(
         elif options.method == 'global':
             opt_result = _optimize_global(tracked, pvec_0, (lb_vec, ub_vec), options)
         else:
-            def resid_fn(pvec):
-                return compute_residuals(np.clip(pvec, lb_vec, ub_vec), data, model_wrapper,
-                                         param_handler, worker_options)[0]
+            # a partial of a module-level function, so it pickles for the worker pool
+            resid_fn = functools.partial(_bounded_residuals, lb=lb_vec, ub=ub_vec, data=data,
+                                         model_wrapper=model_wrapper, param_handler=param_handler,
+                                         options=worker_options)
             local_solver = _optimize_trf if options.method == 'trf' else _optimize_levmar
             opt_result = local_solver(tracked, pvec_0, (lb_vec, ub_vec), options, resid_fn=resid_fn)
     except KeyboardInterrupt:

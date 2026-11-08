@@ -111,12 +111,23 @@ def _fit_data(model):
     return model(_FIT_TRUE)
 
 
-def _esfit_levmar(device='cpu'):
-    """levmar, 4 parameters: serial finite-difference Jacobian (5 calls per J) today."""
+def _esfit_local(device='cpu', method='levmar', n_workers=1):
+    """Local least-squares fit, 4 parameters, with uncertainties.
+
+    n_workers=1 evaluates the finite-difference probes one after another (levmar's
+    initial Jacobian: 5 calls; trf: 4 per Jacobian; uncertainties: 8);
+    n_workers='auto' evaluates each batch of probes in the process pool.
+    """
     model = _FitModel(device)
     data = _fit_data(model)
-    opt = FitOptions(method='levmar', max_iter=8, compute_uncertainties=True, verbosity=0)
+    opt = FitOptions(method=method, max_iter=8, compute_uncertainties=True, verbosity=0,
+                     n_workers=n_workers, workers='processes')
     return lambda: esfit(data, model, p0=_FIT_START, vary=np.array([0.003, 0.003, 0.003, 0.2]), options=opt)
+
+
+def _esfit_levmar(device='cpu'):
+    """levmar, 4 parameters, sequential finite-difference probes."""
+    return _esfit_local(device, 'levmar', 1)
 
 
 def _esfit_swarm(device='cpu', workers='processes'):
@@ -163,6 +174,9 @@ WORKLOAD_DEVICES = {
     'saffron_hyscore_512': ('cpu', 'cuda'),
     'cardamom_diffusion_200x1000': ('cpu',),
     'esfit_levmar_4p': ('cpu', 'cuda'),
+    'esfit_levmar_4p_procs': ('cpu',),
+    'esfit_trf_4p': ('cpu', 'cuda'),
+    'esfit_trf_4p_procs': ('cpu',),
     'esfit_swarm_4p_procs': ('cpu',),
     'esfit_swarm_4p_threads': ('cpu', 'cuda'),
     'esfit_swarm_threads_matrix': ('cpu',),
@@ -191,6 +205,9 @@ WORKLOADS = {
     'saffron_hyscore_512': _saffron_hyscore,
     'cardamom_diffusion_200x1000': _cardamom_diffusion,
     'esfit_levmar_4p': _esfit_levmar,
+    'esfit_levmar_4p_procs': lambda device='cpu': _esfit_local(device, 'levmar', 'auto'),
+    'esfit_trf_4p': lambda device='cpu': _esfit_local(device, 'trf', 1),
+    'esfit_trf_4p_procs': lambda device='cpu': _esfit_local(device, 'trf', 'auto'),
     'esfit_swarm_4p_procs': lambda device='cpu': _esfit_swarm(device, workers='processes'),
     'esfit_swarm_4p_threads': lambda device='cpu': _esfit_swarm(device, workers='threads'),
     'esfit_swarm_threads_matrix': _esfit_swarm_threads_matrix,

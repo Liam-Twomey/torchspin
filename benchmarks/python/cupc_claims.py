@@ -33,6 +33,12 @@ import torch
 
 # Resolve the source checkout when the script is run without an editable install.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _where(path) -> str:
+    """Repo-relative location of an imported module, so reports carry no local paths."""
+    p = Path(path).resolve()
+    return str(p.relative_to(_REPO_ROOT)) if p.is_relative_to(_REPO_ROOT) else 'installed package'
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
@@ -183,9 +189,9 @@ def main() -> int:
         '# CuPc pepper claims',
         '',
         f'- date: {_dt.date.today().isoformat()}',
-        f'- torchspin: {torchspin.__version__} ({torchspin.__file__})',
+        f'- torchspin: {torchspin.__version__} ({_where(torchspin.__file__)})',
         f'- torch: {torch.__version__}, threads: {torch.get_num_threads()}',
-        f'- python: {platform.python_version()} on {platform.platform()}',
+        f'- python: {platform.python_version()} on {platform.system()} {platform.machine()}',
         '',
         'System (Pc_Fits.m): S=1/2, g = [2.04894 2.04894 2.181], '
         'A(Cu) = [15.3311 15.3311 646.629] MHz,',

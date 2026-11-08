@@ -6,6 +6,51 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.6.2] — 2026-11-08
+
+Bug fixes found while running the GPU tests on a CUDA host.
+
+### Fixed
+
+- **pepper on CUDA failed in every public release (0.3.0–0.6.1)** with
+  "Expected all tensors to be on the same device". The transition pre-selection
+  (`_preselect_pairs`) built its rate and mask tensors on the CPU, so every
+  `Options(device='cuda')` call aborted before simulating. The CPU-vs-CUDA
+  consistency tests catch this, but they only run on a GPU host.
+- **pepper was not thread-safe.** The slot keys of the matrix method were kept
+  in a function attribute shared by the whole process. With concurrent pepper
+  calls, such as `esfit(..., FitOptions(workers='threads'))` or any user thread
+  pool, one call could read another's keys: `_filter_slots` raised
+  `IndexError: list index out of range`, or `separate='transitions'` mislabeled
+  transitions. The keys are now per thread. This was found when a benchmark
+  fit with the thread backend crashed on a single-core allocation.
+- `sigeq(..., polarization=True)` built its identity matrix on the CPU, so it
+  failed with a device mismatch for a CUDA Hamiltonian.
+
+### Changed — behavior differs from 0.6.1
+
+- **Seeded cardamom results no longer depend on the thread count.** The fast
+  path groups orientations, and the group size scales with
+  `torch.get_num_threads()`. Every group used to draw its trajectories from the
+  same `CardamomPar.seed`, so a seeded spectrum changed with the number of
+  threads, and orientations in different groups shared identical trajectories.
+  Each orientation now draws from its own stream, derived from the seed with
+  `numpy.random.SeedSequence`. The global-dynamics (`DiffGlobal`) trajectories
+  of a group also started from a spiral grid over the whole group rather than
+  over `nTraj`, which made the result depend on the group size too; they now
+  start from the same per-orientation grid as the serial path. Seeded cardamom
+  spectra differ from 0.6.1. Unseeded runs are unaffected.
+
+### Added
+
+- `DiffusionPar.seed` and `JumpPar.seed` accept a sequence of per-block seeds:
+  the trajectories split into equal blocks with independent random streams.
+
+### Tests
+
+- The garlic CPU-vs-CUDA test compared the CPU with itself (garlic has no device
+  path) and is removed. salt and `sigeq` have real CPU-vs-CUDA tests.
+
 ## [0.6.1] — 2026-11-04
 
 Fixes for GitHub issues #5–#9. Each one was a case where torchspin returned a

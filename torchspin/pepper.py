@@ -596,7 +596,8 @@ def _preselect_pairs(H0, mux, muy, muz, sys, exp, opt, B_center, freq_sweep=Fals
     phi_t, theta_t, _, _ = sphgrid('D2h', 4)
     geom = excitation_geometry(exp_mw_mode(exp))
     Ex, Ey, Ez = -mux, -muy, -muz
-    max_rate = torch.zeros(n, n, dtype=torch.float64)
+    dev = H0.device
+    max_rate = torch.zeros(n, n, dtype=torch.float64, device=dev)
     for ph, th in zip(phi_t.tolist(), theta_t.tolist()):
         st, ct, sp, cp = math.sin(th), math.cos(th), math.sin(ph), math.cos(ph)
         muzL = st * (cp * mux + sp * muy) + ct * muz
@@ -610,7 +611,7 @@ def _preselect_pairs(H0, mux, muy, muz, sys, exp, opt, B_center, freq_sweep=Fals
             ExL = ct * Exy - st * Ez
             rate = ((V.conj().T @ ExL @ V).abs() ** 2 + (V.conj().T @ EyL @ V).abs() ** 2) / 2
         max_rate = torch.maximum(max_rate, rate.real.to(torch.float64))
-    keep = torch.triu(torch.ones(n, n, dtype=torch.bool), diagonal=1)
+    keep = torch.triu(torch.ones(n, n, dtype=torch.bool, device=dev), diagonal=1)
     if sys.nNuclei > 0:
         nu = float(exp.mwFreq) * 1e3 if not freq_sweep else 1e9   # MHz (frequency sweeps: no exclusion)
         A = sys.A.detach().cpu().numpy()
@@ -619,7 +620,7 @@ def _preselect_pairs(H0, mux, muy, muz, sys, exp, opt, B_center, freq_sweep=Fals
         if hfi.max() < 0.5:
             n_el = int(np.prod([2 * float(S_) + 1 for S_ in sys.S]))
             n_nuc = n // n_el
-            el_idx = torch.arange(n) // n_nuc
+            el_idx = torch.arange(n, device=dev) // n_nuc
             keep &= el_idx.unsqueeze(1) != el_idx.unsqueeze(0)   # drop pure nuclear transitions
     rates = max_rate[keep]
     cutoff = thr * float(rates.detach().max()) if rates.numel() else 0.0

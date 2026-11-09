@@ -25,7 +25,17 @@ try:
     __version__ = _pkg_version("torchspin")
 except _PkgNotFound:
     # Editable install during development, or version metadata unavailable.
-    __version__ = "0.6.2+dev"
+    __version__ = "0.6.3+dev"
+
+# OpenMP threads that spin-wait after every parallel region starve the Python thread
+# and torchspin's own worker threads; on many-core Linux nodes this made fits several
+# times slower with 8 threads than with 1. The OpenMP runtime reads OMP_WAIT_POLICY
+# once, when torch loads it, so this works only if torchspin is imported before torch.
+# An explicit user setting always wins. See docs/pitfalls.md, "Threads and performance".
+import os as _os
+import sys as _sys
+if 'torch' not in _sys.modules:
+    _os.environ.setdefault('OMP_WAIT_POLICY', 'PASSIVE')
 
 from torchspin._compile import maybe_compile, set_compile_enabled, is_compile_available
 from torchspin.autograd import differentiable_spectrum

@@ -159,9 +159,11 @@ class FitOptions:
     trf_x_scale: Union[str, float, np.ndarray] = 'jac'
     trf_gradient_tol: float = 1e-7
     # Parallelism for population-based methods (swarm, genetic, montecarlo,
-    # grid, global). n_workers=1 is sequential; an int > 1 or 'auto' (one per
-    # core) evaluates the population in a spawned process pool with one torch
-    # thread per worker (workers='auto'|'processes'; 'threads' forces a thread
+    # grid, global). n_workers=1 is sequential; an int > 1 or 'auto' evaluates
+    # the population in a spawned process pool with one torch thread per worker.
+    # 'auto' = the cores this process may use (affinity / SLURM aware), at most
+    # 32, and no more than about 0.5 GB per worker within half the available
+    # memory: each worker is a separate Python process with its own torch (workers='auto'|'processes'; 'threads' forces a thread
     # pool, which gains little because the forward model holds the GIL).
     # Models defined in a notebook cell need cloudpickle (pip install
     # cloudpickle) to reach the workers; otherwise a thread pool is used.
@@ -1575,10 +1577,12 @@ class _CloudPickled:
 
 
 def _resolve_workers(n_workers, n: int) -> int:
-    """'auto' → all cores (capped by the population size); ints pass through."""
+    """'auto' → the cores this process may use (affinity / SLURM aware), capped by the
+    available memory (about 0.5 GB per worker, half the free memory), by 32 and by
+    the population size; ints pass through."""
     if isinstance(n_workers, str):
-        import os
-        return max(1, min(os.cpu_count() or 1, n))
+        from torchspin._resources import auto_workers
+        return auto_workers(n)
     return int(n_workers or 1)
 
 
@@ -1590,7 +1594,7 @@ def _eval_population(
 ) -> np.ndarray:
     """Evaluate ``objective_fn`` on each row of ``X``.
 
-    ``n_workers > 1`` (or ``'auto'`` = one per core) evaluates the rows
+    ``n_workers > 1`` (or ``'auto'``, see :class:`FitOptions`) evaluates the rows
     concurrently.  ``workers='processes'`` uses a spawned process pool with one
     torch thread per worker — the effective option for torchspin forward models,
     whose Python-level work holds the GIL.  The objective is pickled by

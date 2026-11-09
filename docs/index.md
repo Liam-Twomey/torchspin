@@ -52,7 +52,8 @@ deterministically for a given seed) and the differentiable losses
 ## Running on a workstation
 
 - CPU: torchspin uses all cores through thread pools inside the simulators (`torch.set_num_threads(n)`
-  caps it). Population-based fits add `FitOptions(n_workers='auto')` (one process per core;
+  caps it). Population-based fits add `FitOptions(n_workers='auto')` (worker processes for the allocated cores, at most 32,
+  about 0.5 GB of memory each and never more than half the free memory;
   `pip install "torchspin[fit]"` for models defined in notebooks).
 - GPU: `Options(device='cuda')`; worthwhile for autograd and batched fitting, not for single simulations.
 - Progress and early stop: `FitOptions(progress='text', max_time=…)`; a kernel interrupt returns the best

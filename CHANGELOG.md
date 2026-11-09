@@ -6,6 +6,31 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.6.5] — 2026-11-09
+
+### Fixed
+
+- **`FitOptions(n_workers='auto')` could start far more worker processes than
+  the machine or job could hold.** It meant one worker per core of the whole
+  machine (`os.cpu_count()`), and every worker is a separate Python process
+  with its own torch, about 0.3–0.5 GB before the model allocates anything. On
+  a 224-core node that is over 200 workers and roughly 80 GB, even inside a
+  SLURM job granted 16 cores and 8 GB. `'auto'` now takes the smallest of:
+  - the cores this process may use (CPU affinity, then `SLURM_CPUS_PER_TASK`);
+  - 32 (more workers did not make fits faster in our measurements);
+  - the workers that fit in half the available memory at 0.5 GB each, where
+    available memory honors the cgroup limit of a SLURM job or container and
+    the job's SLURM memory request;
+  - the number of tasks.
+
+  An explicit integer is used as given. In a 16-core SLURM job, `'auto'` now
+  gives 7 workers with `--mem=8G` and 2 with `--mem=3G`.
+
+### Documentation
+
+- README: how to launch the interactive fitting panel (`torchspin.fitgui`),
+  and what `n_workers='auto'` costs in memory.
+
 ## [0.6.4] — 2026-11-09
 
 ### Fixed

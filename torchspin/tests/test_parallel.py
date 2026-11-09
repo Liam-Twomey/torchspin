@@ -141,7 +141,10 @@ def test_thread_budget_blas_cap_optional():
 
 
 def test_esfit_auto_workers_use_cpu_budget(monkeypatch):
-    monkeypatch.setattr(parallel, 'cpu_budget', lambda: 3)
+    import importlib
+    res = importlib.import_module('torchspin._resources')
+    monkeypatch.setattr(res, 'cpu_budget', lambda: 3)
+    monkeypatch.setattr(res, 'available_memory', lambda: None)
     assert _esfit._resolve_workers('auto', 100) == 3
     assert _esfit._resolve_workers('auto', 2) == 2
     assert _esfit._resolve_workers(5, 100) == 5

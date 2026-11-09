@@ -162,10 +162,13 @@ class FitOptions:
     # trf, lbfgsb and the uncertainty estimate evaluate the independent
     # finite-difference probes of each Jacobian or gradient concurrently (trf
     # and lbfgsb need SciPy >= 1.16; older SciPy runs them sequentially).
-    # n_workers=1 is sequential; an int > 1 or 'auto' (one per core) uses a
-    # spawned process pool with the cores split between the workers
-    # (workers='auto'|'processes'; 'threads' forces a thread pool, which gains
-    # little because the forward model holds the GIL).
+    # n_workers=1 is sequential; an int > 1 or 'auto' uses a spawned process
+    # pool with the cores split between the workers (workers='auto'|'processes';
+    # 'threads' forces a thread pool, which gains little because the forward
+    # model holds the GIL). 'auto' = the cores this process may use (affinity /
+    # SLURM aware), at most 32, and no more than about 0.5 GB per worker within
+    # half the available memory: each worker is a separate Python process with
+    # its own torch.
     # Models defined in a notebook cell need cloudpickle (pip install
     # cloudpickle) to reach the workers; otherwise a thread pool is used.
     n_workers: Union[int, str] = 1
@@ -1619,11 +1622,12 @@ def _threads_per_worker(n_workers: int) -> int:
 
 
 def _resolve_workers(n_workers, n: int) -> int:
-    """'auto' → every core this process may use (affinity / SLURM aware, see
-    torchspin.parallel.cpu_budget), capped by the population size; ints pass through."""
+    """'auto' → the cores this process may use (affinity / SLURM aware), capped by the
+    available memory (about 0.5 GB per worker, half the free memory), by 32 and by
+    the population size; ints pass through."""
     if isinstance(n_workers, str):
-        from torchspin.parallel import cpu_budget
-        return max(1, min(cpu_budget(), n))
+        from torchspin._resources import auto_workers
+        return auto_workers(n)
     return int(n_workers or 1)
 
 
@@ -1719,7 +1723,7 @@ def _eval_population(
 ) -> np.ndarray:
     """Evaluate ``objective_fn`` on each row of ``X``.
 
-    ``n_workers > 1`` (or ``'auto'`` = one per core) evaluates the rows
+    ``n_workers > 1`` (or ``'auto'``, see :class:`FitOptions`) evaluates the rows
     concurrently.  ``workers='processes'`` uses a spawned process pool with the
     cores split between the workers — the effective option for torchspin forward
     models, whose Python-level work holds the GIL.  The objective is pickled by

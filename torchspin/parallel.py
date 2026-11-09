@@ -51,26 +51,11 @@ def cpu_budget() -> int:
     In order of precedence: the CPU affinity mask (Linux ``sched_getaffinity``,
     which reflects ``taskset`` and scheduler cgroups), ``SLURM_CPUS_PER_TASK``,
     and ``os.cpu_count()``. A SLURM value larger than the affinity mask is ignored,
-    because the mask is what the kernel enforces.
+    because the mask is what the kernel enforces. (Implemented in
+    :mod:`torchspin._resources`, which also sizes ``n_workers='auto'`` by memory.)
     """
-    n = None
-    getaff = getattr(os, 'sched_getaffinity', None)
-    if getaff is not None:
-        try:
-            n = len(getaff(0))
-        except OSError:
-            n = None
-    slurm = os.environ.get('SLURM_CPUS_PER_TASK')
-    if slurm:
-        try:
-            s = int(slurm)
-        except ValueError:
-            s = None
-        if s and s > 0:
-            n = s if n is None else min(n, s)
-    if n is None:
-        n = os.cpu_count() or 1
-    return max(1, int(n))
+    from torchspin._resources import cpu_budget as _cpu_budget
+    return _cpu_budget()
 
 
 def inner_threads() -> int:

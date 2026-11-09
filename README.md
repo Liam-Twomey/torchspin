@@ -96,8 +96,50 @@ print('Best-fit g:', result.pfit)
 ```
 
 `progress='text'` prints RMSD, evaluation count and ETA as it runs, and
-interrupting the kernel returns the best fit so far. Population-based methods
-parallelize over processes with `FitOptions(n_workers='auto')`.
+interrupting the kernel returns the best fit so far.
+
+With `FitOptions(n_workers='auto')`, model evaluations run in parallel worker
+processes: each generation of the population methods (swarm, genetic, grid,
+montecarlo, global), and the finite-difference probes of each levmar, trf and
+lbfgsb Jacobian (1.5–3× faster for a 4-parameter pepper fit). This is off by default. Each worker is a separate Python process with its own torch
+(about 0.3–0.5 GB), so `'auto'` uses the cores you were allocated, at most 32, and
+no more workers than fit in half the free memory. A script that uses it needs the
+usual `if __name__ == '__main__':` guard around the code that runs the fit.
+
+### Interactive fitting panel (`torchspin.fitgui`)
+
+In JupyterLab (`pip install "torchspin[gui]"`), the same kind of fit runs in a panel
+with parameter sliders, fix boxes, method controls, Start/Stop and a live plot of the
+fit, residual and RMSD:
+
+```python
+%matplotlib widget
+import numpy as np
+from torchspin import SpinSystem, Experiment, Options, pepper
+from torchspin.esfit import FitOptions
+from torchspin.fitgui import FitSession, FitPanel
+
+exp = Experiment(mwFreq=9.5, Range=[330, 350], nPoints=1024, Harmonic=1)
+
+def model(p):  # p = [gx, gy, gz, Az (MHz), lwpp (mT)]
+    sys = SpinSystem(S=[0.5], g=p[:3], Nucs='14N', A=[[18, 18, p[3]]], lwpp=[p[4], 0])
+    return pepper(sys, exp, Options(GridSize=[31, 4], Verbosity=0))[1].numpy()
+
+B = np.linspace(330, 350, 1024)
+data = model([2.0085, 2.0060, 2.0025, 92.0, 0.35])          # or your measured spectrum
+data = data + 0.02 * np.abs(data).max() * np.random.default_rng(1).standard_normal(data.size)
+
+session = FitSession(data, model, p0=[2.011, 2.0085, 2.005, 101.0, 0.5],
+                     vary=[0.004, 0.004, 0.004, 15.0, 0.25],
+                     names=['gx', 'gy', 'gz', 'Az', 'lwpp'],
+                     options=FitOptions(method='global', max_iter=100))
+FitPanel(session, x=B, xlabel='B (mT)').show()
+```
+
+Press **Start** to fit; **Stop** returns the best fit so far, and `session.result`
+holds the result afterwards. The panel's `n_workers` box accepts `auto` for parallel
+population fits. The full walkthrough is
+[`examples/notebooks/09_fit_gui.ipynb`](examples/notebooks/09_fit_gui.ipynb).
 
 ### Differentiable spectrum
 

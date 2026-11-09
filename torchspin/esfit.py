@@ -1542,7 +1542,9 @@ def _get_pool(n_proc: int, per: int):
     for k in saved:
         os.environ[k] = str(per)
     try:
-        pool = mp.get_context('spawn').Pool(n_proc, initializer=_pool_init, initargs=(per,))
+        from torchspin._omp import passive_for_children
+        with passive_for_children():
+            pool = mp.get_context('spawn').Pool(n_proc, initializer=_pool_init, initargs=(per,))
     finally:
         for k, v in saved.items():
             if v is None:

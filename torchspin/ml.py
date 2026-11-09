@@ -254,7 +254,10 @@ def simulate_batch(simulator, template: SpinSystem, exp, opt, spec: ParamSpec, p
         ctx = mp.get_context('spawn')
         tk = _template_kwargs(template)
         jobs = [(simulator, tk, spec, exp, opt, params[i].detach().numpy(), sim_kwargs) for i in range(n)]
-        with ctx.Pool(workers) as pool:
+        from torchspin._omp import passive_for_children
+        with passive_for_children():
+            pool = ctx.Pool(workers)
+        with pool:
             res = pool.map(_worker, jobs)
         x = torch.as_tensor(res[0][0])
         return x, torch.stack([torch.as_tensor(r[1]) for r in res])

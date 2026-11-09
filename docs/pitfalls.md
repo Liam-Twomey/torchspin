@@ -76,17 +76,20 @@ worker threads were starved by those spinning threads, and a fit could take seve
 with 8 threads than with 1.
 
 Since 0.6.3, `import torchspin` sets `OMP_WAIT_POLICY=PASSIVE` so idle OpenMP threads sleep. The
-OpenMP runtime reads this variable only once, when torch first loads, so this only works if
-torchspin is imported **before** torch (or before any library that imports torch). An explicit
-value set by the user is never overridden. If torch has to be imported first, set the variable
-yourself before Python starts:
+OpenMP runtime reads this variable only once, when torch first loads, so in your own process this
+only works if torchspin is imported **before** torch (or before any library that imports torch).
+An explicit value set by the user is never overridden.
+
+If torch was imported first, torchspin cannot fix this for the current process. On Linux with more
+than one torch thread it warns once on import. Worker processes that torchspin starts (esfit's
+process pool, `torchspin.ml.simulate_batch`) always get the policy, whatever the import order. To
+cover your own process too, import torchspin first or set the variable before Python starts:
 
 ```bash
 export OMP_WAIT_POLICY=PASSIVE
 ```
 
-To check: `python -c "import torch, torchspin, os; print(os.environ.get('OMP_WAIT_POLICY'))"`
-prints `None` when torch came first and the variable was not set.
+Any explicit value, including `ACTIVE`, silences the warning.
 
 ## Pulse simulations (spidyan, saffron real pulses)
 

@@ -22,6 +22,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   imported before torch; an explicit user setting is never changed. See
   `docs/pitfalls.md`, "Threads and performance".
 
+  Measured with paired A/B runs (default vs PASSIVE, interleaved, pinned) on
+  all 13 benchmark workloads at 1–64 threads, on a 224-core cluster node and
+  a 64-core workstation. At 8 threads the 20-call fit loop went from 9.5 to
+  2.4 s and from 3.3 to 2.2 s, and the levmar fit from 13.2 to 4.1 s and from
+  5.8 to 3.4 s. No workload became measurably slower at any thread count.
+
 ## [0.6.2] — 2026-11-08
 
 Bug fixes found while running the GPU tests on a CUDA host.

@@ -131,14 +131,17 @@ def native_thread_env(n: int):
 
     Child processes inherit the environment at spawn and size their native pools
     from it at import. Without these caps every spawned worker starts one thread
-    per core. The previous values are restored on exit.
+    per core. Workers also start with ``OMP_WAIT_POLICY=PASSIVE`` unless the user
+    set a value (see :mod:`torchspin._omp`). The previous values are restored on exit.
     """
+    from torchspin._omp import passive_for_children
     n = max(1, int(n))
     saved = {k: os.environ.get(k) for k in NATIVE_THREAD_VARS}
     for k in NATIVE_THREAD_VARS:
         os.environ[k] = str(n)
     try:
-        yield n
+        with passive_for_children():
+            yield n
     finally:
         for k, v in saved.items():
             if v is None:

@@ -179,3 +179,14 @@ def test_esfit_thread_backend_keeps_full_inner_budget(monkeypatch):
         assert seen and all(s == torch.get_num_threads() for s in seen)
     finally:
         torch.set_num_threads(prev)
+
+
+def test_native_thread_env_passes_passive_wait_policy_to_children(monkeypatch):
+    from torchspin.parallel import native_thread_env
+    monkeypatch.delenv('OMP_WAIT_POLICY', raising=False)
+    with native_thread_env(2):
+        assert os.environ['OMP_WAIT_POLICY'] == 'PASSIVE'
+    assert 'OMP_WAIT_POLICY' not in os.environ
+    monkeypatch.setenv('OMP_WAIT_POLICY', 'ACTIVE')
+    with native_thread_env(2):
+        assert os.environ['OMP_WAIT_POLICY'] == 'ACTIVE'

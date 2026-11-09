@@ -61,6 +61,22 @@ Work toward v1.0 performance on branch `dev/v1-acceleration`; see
 - `benchmarks/cluster/slurm_cpu.sh` and `slurm_gpu.sh`, replaced by the
   array template. The CPU script's thread sweep was mislabeled (see Fixed).
 
+## [0.6.4] — 2026-11-09
+
+### Fixed
+
+- **The 0.6.3 thread fix did not apply when torch was imported before
+  torchspin**, the usual order in scripts (`import torch` first). The OpenMP
+  runtime had already read `OMP_WAIT_POLICY`, so fits stayed slow with more
+  threads. Now:
+  - esfit's process workers and `torchspin.ml.simulate_batch` workers always
+    start with `OMP_WAIT_POLICY=PASSIVE` (unless the user set a value), since
+    each worker loads its own runtime;
+  - when it is too late for the current process (torch loaded first, variable
+    unset, Linux, more than one torch thread), `import torchspin` warns once
+    with the fix: import torchspin first, or `export OMP_WAIT_POLICY=PASSIVE`.
+  See `docs/pitfalls.md`, "Threads and performance".
+
 ## [0.6.3] — 2026-11-08
 
 ### Fixed

@@ -97,11 +97,11 @@ def curry(
     experiment.
 
     Unit conventions:
-        * 1 m³/mol (SI) = 10⁶ cm³/mol (CGS-Gaussian)
-        * To convert to cm³/mol: multiply by 10⁶
+        * 1 cm³/mol (CGS-Gaussian, "emu/mol") = 4π × 10⁻⁶ m³/mol (SI)
+        * To convert to cm³/mol: multiply by 10⁶ / (4π) ≈ 79 577.5
 
     Curie law check (S=1/2, g=2.0, T=300 K):
-        χ_mol ≈ 1.57 × 10⁻⁸ m³/mol  = 1.57 × 10⁻² cm³/mol
+        χ_mol ≈ 1.57 × 10⁻⁸ m³/mol  = 1.25 × 10⁻³ cm³/mol  (χT = 0.375 cm³·K/mol)
     """
     # -----------------------------------------------------------------------
     # Parse inputs

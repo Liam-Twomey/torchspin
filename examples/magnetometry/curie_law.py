@@ -27,14 +27,14 @@ def run():
     mu_BM, chi_mol = curry(Sys, B_fields, T_arr, grid_size=15)
 
     # chi_mol shape: (nB, nT) in m³/mol; convert to cm³/mol
-    chi_cm3 = chi_mol[0, :].numpy() * 1e6   # m³/mol -> cm³/mol
+    chi_cm3 = chi_mol[0, :].numpy() * 1e6 / (4 * np.pi)   # m³/mol (SI) -> cm³/mol (CGS)
 
     # Analytical Curie constant (SI):
     #   C [m³·K/mol] = mu0 * N_A * mu_B^2 * g^2 * S(S+1) / (3 * k_B)
     mu0 = 4 * np.pi * 1e-7
     N_A = 6.02214076e23
     C_SI  = mu0 * N_A * BMAGN**2 * g_val**2 * S_val * (S_val + 1) / (3 * BOLTZMANN)
-    C_cm3 = C_SI * 1e6   # cm³·K/mol
+    C_cm3 = C_SI * 1e6 / (4 * np.pi)   # cm³·K/mol (CGS); 0.375 for S = 1/2, g = 2
     chi_curie = C_cm3 / T_arr
 
     chiT = chi_cm3 * T_arr

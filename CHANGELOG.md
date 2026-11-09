@@ -6,6 +6,28 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.6.6] — 2026-11-09
+
+### Fixed
+
+- **Every cm⁻¹ conversion in `unitconvert` was off by a factor of 100**
+  (in every public release, 0.3.0–0.6.5). `CLIGHT` is stored in cm/s, but the
+  conversions multiplied it by 100 again, as if it were in m/s:
+  `unitconvert(1, 'cm^-1->MHz')` returned 2 997 924.58 instead of
+  29 979.2458, and 1 cm⁻¹ came out as 143.9 K instead of 1.4388 K. This
+  affected all eight `cm^-1` conversions (to and from MHz, mT, K and eV) and
+  the energy axis of `levelsplot(..., Units='cm^-1')`, which was 100× too
+  small. The old test built its expected value with the same factor; the new
+  tests compare against exact SI values (1 cm⁻¹ = 29 979.2458 MHz =
+  1.438 776 877 K = 1.239 841 984 × 10⁻⁴ eV).
+- **`curry` docstring: wrong SI-to-CGS factor for the susceptibility.** It
+  said 1 m³/mol = 10⁶ cm³/mol; the correct relation is 1 cm³/mol (CGS) =
+  4π × 10⁻⁶ m³/mol, so SI values are converted to cm³/mol by multiplying by
+  10⁶/(4π). The values `curry` returns (SI) were always correct. The two
+  magnetometry examples used the wrong factor too, so they printed CGS values
+  4π too large (a Curie constant of 4.71 instead of 0.375 cm³·K/mol for
+  S = 1/2, g = 2); a new test checks χT = 0.375 cm³·K/mol.
+
 ## [0.6.5] — 2026-11-09
 
 ### Fixed

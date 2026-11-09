@@ -302,10 +302,25 @@ class TestHilberttrans:
 
 class TestUnitconvert:
     def test_cm1_to_MHz(self):
-        """1000 cm^-1 → 29979 MHz (c = 2.998e10 cm/s)."""
-        out = unitconvert(1000.0, 'cm^-1->MHz')
-        expected = 1000.0 * 100 * CLIGHT / 1e6
-        assert abs(float(out) - expected) < 1e-6
+        """1 cm^-1 = c / 1 cm = 29 979.2458 MHz (exact)."""
+        assert abs(float(unitconvert(1.0, 'cm^-1->MHz')) - 29979.2458) < 1e-6
+
+    def test_cm1_against_codata(self):
+        """cm^-1 conversions against exact SI values, not against the module's own constants.
+
+        1 cm^-1 = 1.438 776 877 K (second radiation constant c2 = hc/k, exact)
+                = 1.239 841 984e-4 eV (hc/e, exact)
+        and back again.
+        """
+        assert abs(float(unitconvert(1.0, 'cm^-1->K')) - 1.438776877) < 1e-9
+        assert abs(float(unitconvert(1.0, 'cm^-1->eV')) - 1.239841984e-4) < 1e-13
+        assert abs(float(unitconvert(1.0, 'K->cm^-1')) - 1 / 1.438776877) < 1e-9
+        assert abs(float(unitconvert(1.0, 'eV->cm^-1')) - 8065.543937) < 1e-5
+        assert abs(float(unitconvert(29979.2458, 'MHz->cm^-1')) - 1.0) < 1e-12
+        # cm^-1 -> mT at g = 2 against MHz -> mT of the same energy
+        via_mhz = float(unitconvert(29979.2458, 'MHz->mT', g=2.0))
+        assert abs(float(unitconvert(1.0, 'cm^-1->mT', g=2.0)) - via_mhz) < 1e-9 * via_mhz
+        assert abs(float(unitconvert(via_mhz, 'mT->cm^-1', g=2.0)) - 1.0) < 1e-12
 
     def test_MHz_to_cm1_roundtrip(self):
         """MHz → cm^-1 → MHz should give identity."""
@@ -443,3 +458,14 @@ class TestHsdim:
         assert hsdim(0.5) == 2
         assert hsdim(1.0) == 3
         assert hsdim(1.5) == 4
+
+
+def test_levelsplot_cm1_axis():
+    """levelsplot(Units='cm^-1') puts 29 979.2458 MHz at 1 cm^-1 (was 0.01 cm^-1)."""
+    import importlib
+    import numpy as np
+    lp = importlib.import_module('torchspin.levelsplot')
+    E = np.array([0.0, 29979.2458, 2 * 29979.2458])
+    np.testing.assert_allclose(lp._convert_energy_values(E, 'cm^-1'), [0.0, 1.0, 2.0], rtol=1e-12)
+    E2, _, _ = lp._convert_energy(E, 'cm^-1')
+    np.testing.assert_allclose(E2, [0.0, 1.0, 2.0], rtol=1e-12)

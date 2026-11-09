@@ -268,8 +268,12 @@ def main():
     # prefer the checkout's torchspin over any (possibly stale) site-packages install
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     import cProfile, io, json, platform, pstats, statistics, subprocess, time
+    # torchspin before torch, as the docs recommend: it sets OMP_WAIT_POLICY=PASSIVE
+    # (unless already set) before the OpenMP runtime loads
+    import torchspin  # noqa: F401
     import numpy as np
     import torch
+    thread_env['OMP_WAIT_POLICY'] = os.environ.get('OMP_WAIT_POLICY')
     from workloads import WORKLOADS, WORKLOAD_DEVICES, STOCHASTIC, supports_device
 
     if a.list:

@@ -61,6 +61,28 @@ Work toward v1.0 performance on branch `dev/v1-acceleration`; see
 - `benchmarks/cluster/slurm_cpu.sh` and `slurm_gpu.sh`, replaced by the
   array template. The CPU script's thread sweep was mislabeled (see Fixed).
 
+## [0.6.3] — 2026-11-08
+
+### Fixed
+
+- **Fits got slower when threads were added on many-core Linux machines.**
+  After each parallel region torch's OpenMP threads spin-wait, and a fit runs
+  many small spectra, so the Python thread and torchspin's worker threads
+  competed with spinning threads for the cores. On a 224-core Linux node one
+  fit-model call (nitroxide, GridSize 31×4) took 84 ms on 1 thread and 554 ms
+  on 8; the 4-parameter levmar fit benchmark took 3.6 s on 1 thread and 11.0 s
+  on 8. `import torchspin` now sets `OMP_WAIT_POLICY=PASSIVE` (idle threads
+  sleep), which brings the 8-thread call to 93 ms. The OpenMP runtime reads the
+  variable once, when torch loads, so this takes effect only when torchspin is
+  imported before torch; an explicit user setting is never changed. See
+  `docs/pitfalls.md`, "Threads and performance".
+
+  Measured with paired A/B runs (default vs PASSIVE, interleaved, pinned) on
+  all 13 benchmark workloads at 1–64 threads, on a 224-core cluster node and
+  a 64-core workstation. At 8 threads the 20-call fit loop went from 9.5 to
+  2.4 s and from 3.3 to 2.2 s, and the levmar fit from 13.2 to 4.1 s and from
+  5.8 to 3.4 s. No workload became measurably slower at any thread count.
+
 ## [0.6.2] — 2026-11-08
 
 Bug fixes found while running the GPU tests on a CUDA host.

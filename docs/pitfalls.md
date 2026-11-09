@@ -66,6 +66,28 @@ For allowed (ΔmI = 0) transitions the spectrum is even in Q, so dL/dQ = 0 exact
 gradient-based fit started at Q = 0 never moves Q, even with the autograd graph intact. Start from a
 nonzero value.
 
+## Threads and performance
+
+### More threads making a fit slower
+
+On many-core Linux machines, torch's OpenMP threads used to spin-wait at full speed after every
+parallel region. A fit evaluates many small spectra, so the Python thread and torchspin's own
+worker threads were starved by those spinning threads, and a fit could take several times longer
+with 8 threads than with 1.
+
+Since 0.6.3, `import torchspin` sets `OMP_WAIT_POLICY=PASSIVE` so idle OpenMP threads sleep. The
+OpenMP runtime reads this variable only once, when torch first loads, so this only works if
+torchspin is imported **before** torch (or before any library that imports torch). An explicit
+value set by the user is never overridden. If torch has to be imported first, set the variable
+yourself before Python starts:
+
+```bash
+export OMP_WAIT_POLICY=PASSIVE
+```
+
+To check: `python -c "import torch, torchspin, os; print(os.environ.get('OMP_WAIT_POLICY'))"`
+prints `None` when torch came first and the variable was not set.
+
 ## Pulse simulations (spidyan, saffron real pulses)
 
 ### Integration step

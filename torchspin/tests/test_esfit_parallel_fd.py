@@ -88,3 +88,33 @@ def test_parallel_probes_reach_the_workers():
         warnings.simplefilter('ignore')
         esfit(_DATA, model, p0=_START, vary=_VARY, options=opt)
     assert seen - {main}, 'no model call left the main thread'
+
+
+def _visible_devices(_x):
+    """Module-level (picklable): what a worker sees."""
+    import os
+    return os.environ.get('CUDA_VISIBLE_DEVICES')
+
+
+def test_devices_pin_workers_round_robin():
+    """FitOptions.devices gives each spawned worker one GPU, round-robin."""
+    import importlib
+    from torchspin.esfit import _FIT_DEVICES, _map_points
+    E = importlib.import_module('torchspin.esfit')  # the module, not the esfit() function
+    token = _FIT_DEVICES.set(['cuda:0', 'cuda:1'])
+    try:
+        E._POOL = None if E._POOL is None else (E._POOL[2].terminate() or None)
+        seen = _map_points(_visible_devices, list(range(16)), 4, 'processes')
+    finally:
+        _FIT_DEVICES.reset(token)
+        if E._POOL is not None:
+            E._POOL[2].terminate(); E._POOL = None
+    # the devices exist only as strings here: no GPU is needed for the assignment
+    assert set(seen) == {'0', '1'}
+
+
+def test_devices_reject_non_cuda():
+    from torchspin.esfit import _cuda_index
+    assert _cuda_index('cuda:1') == '1' and _cuda_index('cuda') == '0' and _cuda_index(2) == '2'
+    with pytest.raises(ValueError):
+        _cuda_index('cpu')

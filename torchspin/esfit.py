@@ -170,6 +170,12 @@ class FitOptions:
     # cloudpickle) to reach the workers; otherwise a thread pool is used.
     n_workers: Union[int, str] = 1
     workers: str = 'auto'
+    # GPUs for process workers, e.g. ['cuda:0', 'cuda:1']: each spawned worker
+    # is pinned to one of them, round-robin, by setting CUDA_VISIBLE_DEVICES
+    # before CUDA starts in it, so a model that uses device='cuda' runs on its
+    # own GPU. None (default) leaves the workers' GPU visibility unchanged.
+    # Ignored by the thread backend (one process sees one set of devices).
+    devices: Optional[list] = None
     # Seed for numpy RNGs in population-based optimizers. None (default)
     # = non-deterministic (each run produces a different particle/sample
     # realization). An int (e.g. seed=42) makes the fit bit-reproducible
@@ -1531,10 +1537,29 @@ def _tracker_of(fn) -> _FitProgress:
     return t if t is not None else _FitProgress(FitOptions(), 'none', enabled=False)
 
 
-_POOL = None                # cached spawn pool: (n_proc, threads_per_worker, pool)
+_POOL = None                # cached spawn pool: (n_proc, threads_per_worker, pool, devices)
 
 
-def _pool_init(n_threads: int):
+import contextvars as _contextvars
+# FitOptions.devices of the fit in progress (set by esfit, read when a pool is made)
+_FIT_DEVICES: _contextvars.ContextVar = _contextvars.ContextVar('esfit_devices', default=None)
+
+
+def _cuda_index(dev) -> str:
+    """'cuda:1' / 1 / torch.device('cuda', 1) -> '1' (a CUDA_VISIBLE_DEVICES entry)."""
+    if isinstance(dev, int):
+        return str(dev)
+    d = torch.device(dev)
+    if d.type != 'cuda':
+        raise ValueError(f"FitOptions.devices takes CUDA devices, got {dev!r}")
+    return str(d.index or 0)
+
+
+def _pool_init(n_threads: int, device_queue=None):
+    import os as _os
+    if device_queue is not None:
+        # before any CUDA call in this worker, so the runtime only sees this GPU
+        _os.environ['CUDA_VISIBLE_DEVICES'] = device_queue.get()
     import torch as _torch
     _torch.set_num_threads(n_threads)
 
@@ -1544,7 +1569,9 @@ def _get_pool(n_proc: int, per: int):
     thread pool exists), created once and reused across generations/calls."""
     global _POOL
     import multiprocessing as mp
-    if _POOL is not None and _POOL[0] == n_proc and _POOL[1] == per:
+    devices = _FIT_DEVICES.get()
+    devices = tuple(_cuda_index(d) for d in devices) if devices else None
+    if _POOL is not None and _POOL[0] == n_proc and _POOL[1] == per and _POOL[3] == devices:
         return _POOL[2]
     if _POOL is not None:
         _POOL[2].terminate()
@@ -1552,9 +1579,15 @@ def _get_pool(n_proc: int, per: int):
     # pools of numpy/scipy/torch per worker (otherwise every worker starts one
     # thread per core and the pool thrashes)
     from torchspin.parallel import native_thread_env
+    ctx = mp.get_context('spawn')
+    queue = None
+    if devices:
+        queue = ctx.Queue()
+        for k in range(n_proc):
+            queue.put(devices[k % len(devices)])
     with native_thread_env(per):
-        pool = mp.get_context('spawn').Pool(n_proc, initializer=_pool_init, initargs=(per,))
-    _POOL = (n_proc, per, pool)
+        pool = ctx.Pool(n_proc, initializer=_pool_init, initargs=(per, queue))
+    _POOL = (n_proc, per, pool, devices)
     return pool
 
 
@@ -2658,6 +2691,7 @@ def esfit(
     if options.method not in ('simplex', 'lbfgsb', 'powell', 'grid', 'montecarlo', 'genetic', 'swarm', 'global', 'levmar', 'trf'):
         raise ValueError(f"Unknown method: '{options.method}'")
 
+    _FIT_DEVICES.set(list(options.devices) if options.devices else None)
     tracker.start()
     try:
         if options.method == 'simplex':

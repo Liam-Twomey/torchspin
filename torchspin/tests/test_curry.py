@@ -111,6 +111,18 @@ class TestCurieLaw:
             f"relative error {rel_err*100:.1f}%"
         )
 
+    def test_chi_T_matches_textbook_cgs_value(self):
+        """χT = 0.375 cm³·K/mol for S = 1/2, g = 2: the familiar CGS Curie constant.
+
+        curry returns SI (m³/mol); 1 cm³/mol (CGS) = 4π × 10⁻⁶ m³/mol. Checks the
+        conversion stated in the docstring against a value independent of torchspin.
+        """
+        import math
+        sys = SpinSystem(S=[0.5], g=[[2.0, 2.0, 2.0]])
+        _, chi = curry(sys, torch.tensor([10.0]), torch.tensor([300.0]), grid_size=15)
+        chiT_cgs = chi[0, 0].item() * 1e6 / (4 * math.pi) * 300.0
+        assert abs(chiT_cgs - 0.375) < 0.002, chiT_cgs
+
     def test_chi_mol_curie_law_S1(self):
         """Curie law for S=1, g=2.0 at T=300 K."""
         g = 2.0

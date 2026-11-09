@@ -28,7 +28,7 @@ def run():
     results = []
     for Sys, label, mu_theory in systems:
         _, chi_mol = curry(Sys, B_field, T_arr, grid_size=10)
-        chi_cm3 = chi_mol[0, :].numpy() * 1e6   # m³/mol -> cm³/mol
+        chi_cm3 = chi_mol[0, :].numpy() * 1e6 / (4 * np.pi)   # m³/mol (SI) -> cm³/mol (CGS)
         chiT    = chi_cm3 * T_arr
         mu_eff  = np.sqrt(8.0 * chiT)
         results.append((mu_eff, label, mu_theory))

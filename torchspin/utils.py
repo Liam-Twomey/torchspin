@@ -500,34 +500,34 @@ def unitconvert(
 
     Examples
     --------
-    >>> unitconvert(1000.0, 'cm^-1->MHz')     # ≈ 29979 MHz
+    >>> unitconvert(1.0, 'cm^-1->MHz')        # 29979.2458 MHz
     >>> unitconvert(340.0, 'mT->MHz', g=2.0)  # ≈ 9520 MHz
     """
     value = np.asarray(value, dtype=float)
 
     # Conversion table (output in target unit)
     conversions = {
-        'cm^-1->eV':  lambda v: v * 100 * CLIGHT * PLANCK / EVOLT,
-        'cm^-1->K':   lambda v: v * 100 * CLIGHT * PLANCK / BOLTZMANN,
-        'cm^-1->mT':  lambda v: v / g * (PLANCK / BMAGN / 1e-3) * 100 * CLIGHT,
-        'cm^-1->MHz': lambda v: v * 100 * CLIGHT / 1e6,
+        'cm^-1->eV':  lambda v: v * CLIGHT * PLANCK / EVOLT,
+        'cm^-1->K':   lambda v: v * CLIGHT * PLANCK / BOLTZMANN,
+        'cm^-1->mT':  lambda v: v / g * (PLANCK / BMAGN / 1e-3) * CLIGHT,
+        'cm^-1->MHz': lambda v: v * CLIGHT / 1e6,
 
-        'eV->cm^-1':  lambda v: v * EVOLT / (100 * CLIGHT * PLANCK),
+        'eV->cm^-1':  lambda v: v * EVOLT / (CLIGHT * PLANCK),
         'eV->K':      lambda v: v * EVOLT / BOLTZMANN,
         'eV->mT':     lambda v: v / g / BMAGN / 1e-3 * EVOLT,
         'eV->MHz':    lambda v: v * EVOLT / PLANCK / 1e6,
 
-        'K->cm^-1':   lambda v: v * BOLTZMANN / (100 * CLIGHT * PLANCK),
+        'K->cm^-1':   lambda v: v * BOLTZMANN / (CLIGHT * PLANCK),
         'K->eV':      lambda v: v * BOLTZMANN / EVOLT,
         'K->mT':      lambda v: v / g / BMAGN / 1e-3 * BOLTZMANN,
         'K->MHz':     lambda v: v * BOLTZMANN / PLANCK / 1e6,
 
-        'mT->cm^-1':  lambda v: v * g / (PLANCK / BMAGN / 1e-3) / (100 * CLIGHT),
+        'mT->cm^-1':  lambda v: v * g / (PLANCK / BMAGN / 1e-3) / CLIGHT,
         'mT->eV':     lambda v: v * g * BMAGN * 1e-3 / EVOLT,
         'mT->K':      lambda v: v * g * BMAGN * 1e-3 / BOLTZMANN,
         'mT->MHz':    lambda v: v * g * (1e-3 * BMAGN / PLANCK / 1e6),
 
-        'MHz->cm^-1': lambda v: v * 1e6 / (100 * CLIGHT),
+        'MHz->cm^-1': lambda v: v * 1e6 / CLIGHT,
         'MHz->eV':    lambda v: v * 1e6 * PLANCK / EVOLT,
         'MHz->K':     lambda v: v * 1e6 * PLANCK / BOLTZMANN,
         'MHz->mT':    lambda v: v / g * (PLANCK / BMAGN / 1e-3) * 1e6,

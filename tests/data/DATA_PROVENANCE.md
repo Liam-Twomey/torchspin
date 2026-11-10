@@ -33,6 +33,7 @@ Tests comparing against these are true cross-validation.
 | `generate_examples_*.m` | `example_*.mat` | Example simulation outputs |
 | `generate_pepper_cupc_refs.m` | `ref_pepper_cupc.mat` | Cu(II) + ligand nuclei: `matrix`/`perturb`/`hybrid` on the same systems (34 cases), incl. natural-abundance isotopologues, tilted and anisotropic ligand A tensors, quadrupole coupling, enlarged exact core, two components |
 | `generate_pepper_transitions_refs.m` | `ref_pepper_transitions.mat` | `Opt.Transitions` (9 cases): S=3/2 central/outer/`'all'` (powder, HStrain, crystal), S=1 half-field line (`'all'`, `[1 3]`), frequency sweep with one pair |
+| `generate_pepper_quadzeeman_refs.m` | `ref_pepper_quadzeeman.mat` | Field-quadratic `Sys.Ham220`/`Ham222` terms in pepper (S=1 with lwpp and with HStrain, S=3/2), EasySpin field sweeps; `Options.QuadraticZeeman` (0.7.1) |
 
 ### MATLAB-sourced .mat files (by module)
 

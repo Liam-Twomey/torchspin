@@ -63,6 +63,9 @@ def resfields(
         Gaussian FWHM widths (mT) for each transition, shape ``(nTransitions,)``.
         Returns ``None`` if ``sys`` is not provided or no strain parameters.
     """
+    if sys is not None:
+        from torchspin.ham_ezho import check_quadratic_zeeman_unsupported
+        check_quadratic_zeeman_unsupported(sys, opt, 'resfields (single orientation)')
     mwFreq_MHz = exp.mwFreq * 1e3  # GHz → MHz
 
     # Projection of moment onto field direction (lab-z = along B)

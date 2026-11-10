@@ -556,6 +556,18 @@ def _pepper_autograd_single(sys: SpinSystem, exp: Experiment, opt: Options) -> t
     use_perturb = (str(opt.Method).startswith('perturb') and sys.nElectrons == 1
                    and not strain_present and not needs_exact_boltz)
     all_B, all_I, all_P, all_Wl = [None] * n_orient, [None] * n_orient, [None] * n_orient, [None] * n_orient
+    # Options.QuadraticZeeman: lB = 2, 3 Sys.Ham terms in the matrix search (the
+    # implicit-function gradient at the Newton step then uses the full slope).
+    zho = None
+    if bool(getattr(opt, 'QuadraticZeeman', False)):
+        from torchspin.ham_ezho import field_nonlinear_zeeman_ops, has_field_nonlinear_zeeman
+        if has_field_nonlinear_zeeman(sys):
+            if str(opt.Method).startswith('perturb'):
+                raise NotImplementedError(
+                    f"pepper_autograd: Options.Method='{opt.Method}' does not support "
+                    f"Options.QuadraticZeeman=True with field-quadratic/cubic Sys.Ham terms; "
+                    f"use Method='matrix'.")
+            zho = tuple(None if g is None else g.to(device) for g in field_nonlinear_zeeman_ops(sys))
     if use_perturb:
         from torchspin.resfields_perturb import resfields_perturb_batch
         _w = B_hi - B_lo
@@ -566,13 +578,15 @@ def _pepper_autograd_single(sys: SpinSystem, exp: Experiment, opt: Options) -> t
     else:
         with torch.no_grad():
             pairs = _pep._preselect_pairs(H0.detach().cpu(), mux.detach().cpu(), muy.detach().cpu(), muz.detach().cpu(),
-                                          sys, exp, opt, 0.5 * (B_lo + B_hi))
+                                          sys, exp, opt, 0.5 * (B_lo + B_hi),
+                                          zeeman_ho=None if zho is None else tuple(None if g is None else g.cpu() for g in zho))
         opt_rf = _dc_replace(opt, Threshold=0.0)
         batch = auto_batch_size(opt.BatchSize, H0.shape[0], n_orient)
         for s in range(0, n_orient, batch):
             e = min(s + batch, n_orient)
             B_list, I_list, W_list, P_list = resfields_batch(H0, mux, muy, muz, phi_arr[s:e], theta_arr[s:e], exp, opt_rf,
-                                                             sys=sys, return_pairs=True, pairs=pairs)
+                                                             sys=sys, return_pairs=True, pairs=pairs,
+                                                             **({'zeeman_ho': zho} if zho is not None else {}))
             for j in range(e - s):
                 all_B[s + j], all_I[s + j], all_P[s + j], all_Wl[s + j] = B_list[j], I_list[j], P_list[j], W_list[j]
     if all(b is None or b.numel() == 0 for b in all_B):

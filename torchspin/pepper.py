@@ -591,12 +591,14 @@ def _finish_field_sweep(spec: torch.Tensor, x: torch.Tensor, dx: float, exp,
     return out[0] if spec.ndim == 1 else torch.stack(out)
 
 
-def _preselect_pairs(H0, mux, muy, muz, sys, exp, opt, B_center, freq_sweep=False):
+def _preselect_pairs(H0, mux, muy, muz, sys, exp, opt, B_center, freq_sweep=False, zeeman_ho=None):
     """EasySpin resfields transition pre-selection: transition rates of all level
     pairs at the center field on a small D2h grid (TPSGridSize 4); keep the pairs
     whose maximum rate reaches Opt.Threshold × the largest; pure nuclear
     transitions are dropped when the hyperfine interaction is weak
-    (HFIStrength = max|A|·(I+1/2)/ν < 0.5).  Returns a list of (u, v) pairs."""
+    (HFIStrength = max|A|·(I+1/2)/ν < 0.5).  Returns a list of (u, v) pairs.
+    With ``zeeman_ho`` (Options.QuadraticZeeman) the eigenvectors are those of the
+    full H(B_center) including B² n·G2·n + B³ G3[n,n,n]."""
     from torchspin.excitation import excitation_geometry, exp_mw_mode
     thr = float(opt.Threshold)
     n = H0.shape[0]
@@ -610,7 +612,16 @@ def _preselect_pairs(H0, mux, muy, muz, sys, exp, opt, B_center, freq_sweep=Fals
     for ph, th in zip(phi_t.tolist(), theta_t.tolist()):
         st, ct, sp, cp = math.sin(th), math.cos(th), math.sin(ph), math.cos(ph)
         muzL = st * (cp * mux + sp * muy) + ct * muz
-        _, V = torch.linalg.eigh(H0 - float(B_center) * muzL)
+        H_c = H0 - float(B_center) * muzL
+        if zeeman_ho is not None:
+            from torchspin.ham_ezho import project_field_nonlinear_zeeman
+            Q2, Q3 = project_field_nonlinear_zeeman(
+                zeeman_ho, torch.tensor([[st * cp, st * sp, ct]], dtype=torch.float64))
+            if Q2 is not None:
+                H_c = H_c + float(B_center) ** 2 * Q2[0].to(device=dev, dtype=H_c.dtype)
+            if Q3 is not None:
+                H_c = H_c + float(B_center) ** 3 * Q3[0].to(device=dev, dtype=H_c.dtype)
+        _, V = torch.linalg.eigh(H_c)
         Exy = cp * Ex + sp * Ey
         if geom.parallel:
             EzL = st * Exy + ct * Ez
@@ -1328,6 +1339,19 @@ def _pepper_single(
             _ops.extend(t.to(device) for t in ham(ham_sys, B0=None))
         return _ops
 
+    # Options.QuadraticZeeman: field-quadratic/cubic Sys.Ham terms (lB = 2, 3) in
+    # the matrix resonance search.  Perturbation theory and the hybrid method work
+    # from H0 - B·μ and cannot include them.
+    _zho = None
+    if bool(getattr(opt, 'QuadraticZeeman', False)):
+        from torchspin.ham_ezho import field_nonlinear_zeeman_ops, has_field_nonlinear_zeeman
+        if has_field_nonlinear_zeeman(sys):   # sys, not ham_sys: nucspinrmv (hybrid core) drops Sys.Ham
+            if str(opt.Method).startswith('perturb') or hybrid_info is not None:
+                raise NotImplementedError(
+                    f"pepper: Options.Method='{opt.Method}' does not support Options.QuadraticZeeman=True "
+                    f"with field-quadratic/cubic Sys.Ham terms (lB >= 2); use Method='matrix'.")
+            _zho = tuple(None if g is None else g.to(device) for g in field_nonlinear_zeeman_ops(ham_sys))
+
     # Non-equilibrium populations (Sys.initState) → density matrix in the
     # Hamiltonian basis; not available with perturbation theory (EasySpin).
     from torchspin.initstate import init_state_density
@@ -1360,7 +1384,7 @@ def _pepper_single(
     _opt_rf = _dc_replace_o(opt, Threshold=0.0)   # slot-based paths pre-select transitions globally (EasySpin)
     _pairs_sel = _preselect_pairs(*_ham_ops(), ham_sys, exp, opt,
                                   float(exp.Field) if freq_sweep else 0.5 * (exp.Range[0] + exp.Range[1]),
-                                  freq_sweep=freq_sweep) if not str(opt.Method).startswith('perturb') else None
+                                  freq_sweep=freq_sweep, zeeman_ho=_zho) if not str(opt.Method).startswith('perturb') else None
 
     # Opt.separate='transitions': one spectrum row per transition slot (EasySpin
     # nSpectra = nTransitions).  Rows are collected per slot by _acc and, for the
@@ -1418,6 +1442,8 @@ def _pepper_single(
         perturbational-nucleus description, and returns the expanded line list.
         """
         opt_ = kw.pop('opt_override', opt_)
+        if _zho is not None:
+            kw['zeeman_ho'] = _zho
         if freq_sweep:
             return resfreqs_batch(*_ham_ops(), phi_b, theta_b, exp_, opt_, ham_sys, **kw)
         if hybrid_info is not None:

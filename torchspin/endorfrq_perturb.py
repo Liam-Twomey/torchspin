@@ -76,6 +76,8 @@ def endorfrq_perturb(
 
     ENDOR transitions connect states mI and mI+1 within the same mS manifold.
     """
+    from torchspin.spinsystem import _reject_h0extra
+    _reject_h0extra(sys, 'endorfrq_perturb (perturbation theory)')
     if sys.nElectrons != 1:
         raise ValueError(
             f"endorfrq_perturb: nElectrons must be 1, got {sys.nElectrons}."

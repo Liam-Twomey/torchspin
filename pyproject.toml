@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "torchspin"
-version = "0.7.1"
+version = "0.7.2"
 description = "Differentiable PyTorch port of EasySpin - EPR/ESR spin Hamiltonian and spectrum simulation"
 readme = "README.md"
 license = "MIT"

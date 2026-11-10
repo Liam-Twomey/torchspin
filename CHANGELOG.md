@@ -6,6 +6,30 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.7.2] — 2026-11-10
+
+### Added
+
+- **`SpinSystem.H0Extra`: generic extra terms in the field-independent
+  Hamiltonian.** A list of `(coeff, op)` pairs; `ham` adds Σ coeff·op (MHz) to
+  H0 on both the `(H0, μ)` and the `ham(Sys, B0)` path, so every simulator that
+  diagonalizes the full Hamiltonian (pepper's matrix method and
+  `pepper_autograd`, `levels`, `resfields`, `resfreqs`, `endorfrq`, `curry`,
+  `nucfrq2d`, saffron's real-pulse engine, spidyan) includes it. `coeff` is a
+  real scalar (float or 0-d tensor) and stays on the autograd graph, as does
+  `op` when it is a tensor that requires grad; `op` is an (n, n) Hermitian
+  matrix in the full spin-system basis (sop order). This allows terms that
+  torchspin has no field for, such as the S=3/2 U term U Σ C_k(S) I_k. Shape,
+  Hermiticity and real coefficients are checked when the spin system is built.
+  `hamsymm` analyzes systems with `H0Extra` through the eigenvalue probe, and
+  `pepper` routes to `pepper_autograd` when a coefficient or operator requires
+  grad. Solvers that build the Hamiltonian from the tensors without `ham`
+  (perturbation theory, `Method='hybrid'`, garlic, chili, fastmotion, cardamom,
+  saffron's fast algorithm, salt for one electron, orisel,
+  `nucspinrmv`/`nucspinkeep`/`nucspinadd`) raise when it is set; so do isotope
+  mixtures in `Nucs` and `SpinSystem.n > 1`. Not an EasySpin feature. The
+  default (`None`) is unchanged.
+
 ## [0.7.1] — 2026-11-10
 
 ### Added

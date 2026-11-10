@@ -82,7 +82,10 @@ def hamsymm(sys: SpinSystem, debug: bool = False) -> tuple[str, torch.Tensor]:
     higher_zeeman = _higher_zeeman_present(sys)
     crystal_field = _crystal_field_present(sys)
     stevens = _stevens_present(sys)
-    high_order = stevens or higher_zeeman or crystal_field
+    # SpinSystem.H0Extra: an arbitrary operator, so only the eigenvalue probe
+    # can find the symmetry (never the O3 shortcut or the geometric path).
+    h0extra = getattr(sys, 'H0Extra', None) is not None
+    high_order = stevens or higher_zeeman or crystal_field or h0extra
 
     full_tensors = _full_tensors_given(sys)
 

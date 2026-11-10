@@ -401,3 +401,87 @@ def ham_ezho(
             G3[i][j][k] = me
 
     return G0, G1, G2, G3
+
+
+# ---------------------------------------------------------------------------
+# Field-nonlinear (quadratic and cubic) Zeeman terms for the simulators
+# (Options.QuadraticZeeman)
+# ---------------------------------------------------------------------------
+
+def _ham_orders_present(sys: SpinSystem) -> set:
+    """Orders lB of the nonzero entries of ``sys.Ham``."""
+    out = set()
+    if sys.Ham is None:
+        return out
+    for key, val in sys.Ham.items():
+        if val is not None and bool(torch.any(torch.as_tensor(val) != 0)):
+            out.add(int(key[0]))
+    return out
+
+
+def has_field_nonlinear_zeeman(sys: SpinSystem) -> bool:
+    """True if ``sys.Ham`` has a nonzero term of order lB >= 2 in the field."""
+    return any(lB >= 2 for lB in _ham_orders_present(sys))
+
+
+def field_nonlinear_zeeman_ops(
+    sys: SpinSystem,
+    dtype: torch.dtype = torch.complex128,
+    device: str = 'cpu',
+) -> Optional[tuple]:
+    """Quadratic and cubic field-derivative tensors of ``sys.Ham`` as stacked tensors.
+
+    Returns ``None`` when ``sys.Ham`` has no nonzero lB >= 2 term, otherwise
+    ``(G2, G3)`` with ``G2`` of shape ``(3, 3, n, n)`` and ``G3`` of shape
+    ``(3, 3, 3, n, n)`` (``None`` when that order is absent), such that
+
+        H(B) = H0 - B·μ + Σ_ij B_i B_j G2[i, j] + Σ_ijk B_i B_j B_k G3[i, j, k]
+
+    equals ``ham(sys, B)``.  For a field ``B n`` along the unit vector ``n`` the
+    nonlinear part is ``B² n·G2·n + B³ G3[n, n, n]``.  Raises
+    ``NotImplementedError`` for terms of order lB >= 4, which the decomposition
+    of :func:`ham_ezho` does not provide.  The ``Ham`` coefficients are constants
+    (not on the autograd graph), as in :func:`ham_ezho`.
+    """
+    orders = _ham_orders_present(sys)
+    if not any(lB >= 2 for lB in orders):
+        return None
+    if any(lB >= 4 for lB in orders):
+        raise NotImplementedError(
+            "Options.QuadraticZeeman: Sys.Ham terms of order lB >= 4 in the field are "
+            "not supported (only lB = 2 and lB = 3)."
+        )
+    _, _, G2l, G3l = ham_ezho(sys, B0=None, dtype=dtype, device=device)
+    G2 = torch.stack([torch.stack(row) for row in G2l]) if 2 in orders else None
+    G3 = (torch.stack([torch.stack([torch.stack(r) for r in plane]) for plane in G3l])
+          if 3 in orders else None)
+    return G2, G3
+
+
+def project_field_nonlinear_zeeman(ops: Optional[tuple], nvec: torch.Tensor) -> tuple:
+    """Per-orientation ``(Q2, Q3)`` = ``(n·G2·n, G3[n,n,n])``, each ``(M, n, n)`` or None.
+
+    ``nvec`` holds the unit field directions, shape ``(M, 3)``.
+    """
+    if ops is None:
+        return None, None
+    G2, G3 = ops
+    Q2 = Q3 = None
+    if G2 is not None:
+        nv = nvec.to(device=G2.device, dtype=G2.dtype)
+        Q2 = torch.einsum('mi,mj,ijab->mab', nv, nv, G2)
+    if G3 is not None:
+        nv = nvec.to(device=G3.device, dtype=G3.dtype)
+        Q3 = torch.einsum('mi,mj,mk,ijkab->mab', nv, nv, nv, G3)
+    return Q2, Q3
+
+
+def check_quadratic_zeeman_unsupported(sys: SpinSystem, opt, where: str) -> None:
+    """Raise when ``opt.QuadraticZeeman`` is on, ``sys.Ham`` has lB >= 2 terms and
+    the calling solver (*where*) cannot include them."""
+    if opt is not None and bool(getattr(opt, 'QuadraticZeeman', False)) and has_field_nonlinear_zeeman(sys):
+        raise NotImplementedError(
+            f"{where} does not support Options.QuadraticZeeman=True with field-quadratic/cubic "
+            f"Sys.Ham terms (lB >= 2). Use pepper with Options.Method='matrix', or set "
+            f"QuadraticZeeman=False to drop these terms as before."
+        )

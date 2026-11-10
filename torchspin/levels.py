@@ -34,6 +34,7 @@ def levels(
     B: Union[torch.Tensor, list, tuple],
     *,
     return_vectors: bool = False,
+    quadratic_zeeman: bool = False,
 ) -> Union[
     tuple[torch.Tensor, torch.Tensor],
     tuple[torch.Tensor, torch.Tensor, torch.Tensor],
@@ -59,6 +60,12 @@ def levels(
         * A scalar tensor or float giving a single field value.
     return_vectors:
         If ``True``, also return eigenvector array ``V``.
+    quadratic_zeeman:
+        If ``True``, include the field-quadratic and field-cubic higher-order
+        Zeeman terms of ``sys.Ham`` (orders lB = 2, 3), so that
+        H(B) = H0 − B·muzL + B²·n·G2·n + B³·G3[n,n,n] equals ``ham(sys, B·n)``
+        (same meaning as ``Options.QuadraticZeeman``).  Default ``False``: these
+        terms are dropped, as before.
 
     Returns
     -------
@@ -94,6 +101,10 @@ def levels(
     # -----------------------------------------------------------------------
     H0, mux, muy, muz = ham(sys, B0=None)
     nStates = H0.shape[0]
+    zho = None
+    if quadratic_zeeman:
+        from torchspin.ham_ezho import field_nonlinear_zeeman_ops, project_field_nonlinear_zeeman
+        zho = field_nonlinear_zeeman_ops(sys, dtype=H0.dtype, device=H0.device)
 
     # -----------------------------------------------------------------------
     # Normalize phi / theta to arrays so we can handle both scalar and vector
@@ -142,11 +153,19 @@ def levels(
 
         # muzL: projection of total moment on field direction
         muzL = sin_th * cos_ph * mux + sin_th * sin_ph * muy + cos_th * muz
+        if zho is not None:
+            Q2, Q3 = project_field_nonlinear_zeeman(
+                zho, torch.tensor([[sin_th * cos_ph, sin_th * sin_ph, cos_th]], dtype=torch.float64))
 
         # Loop over field values
         for iB in range(nB):
             B_val = B_tensor[iB].item()
             H = H0 - B_val * muzL
+            if zho is not None:
+                if Q2 is not None:
+                    H = H + B_val ** 2 * Q2[0]
+                if Q3 is not None:
+                    H = H + B_val ** 3 * Q3[0]
 
             if return_vectors:
                 E_i, V_i = torch.linalg.eigh(H)

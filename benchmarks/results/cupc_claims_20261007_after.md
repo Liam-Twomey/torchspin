@@ -1,9 +1,9 @@
 # CuPc pepper claims
 
 - date: 2026-10-07
-- torchspin: 0.3.0 (/Users/afollmer/Follmer_UCD/Follmer_Lab/Code/torchspin/torchspin/__init__.py)
+- torchspin: 0.3.0 (torchspin/__init__.py)
 - torch: 2.14.1, threads: 10
-- python: 3.14.8 on macOS-15.5-arm64-arm-64bit-Mach-O
+- python: 3.14.8 on Darwin arm64
 
 System (Pc_Fits.m): S=1/2, g = [2.04894 2.04894 2.181], A(Cu) = [15.3311 15.3311 646.629] MHz,
 A(N) = 45 MHz isotropic, lw = 0.542209 mT Gaussian, 9.347144 GHz, 233.8-433.8 mT, 2667 points.

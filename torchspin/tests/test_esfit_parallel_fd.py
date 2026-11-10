@@ -90,27 +90,60 @@ def test_parallel_probes_reach_the_workers():
     assert seen - {main}, 'no model call left the main thread'
 
 
-def _visible_devices(_x):
-    """Module-level (picklable): what a worker sees."""
-    import os
-    return os.environ.get('CUDA_VISIBLE_DEVICES')
+def test_devices_fill_the_worker_queue_round_robin(monkeypatch):
+    """FitOptions.devices: the pool's device queue holds one GPU per worker, round-robin.
 
-
-def test_devices_pin_workers_round_robin():
-    """FitOptions.devices gives each spawned worker one GPU, round-robin."""
+    Checked on the queue rather than by running tasks: which workers pick up a batch of
+    short tasks depends on scheduling, so a task-based check is flaky on slow runners.
+    """
     import importlib
-    from torchspin.esfit import _FIT_DEVICES, _map_points
     E = importlib.import_module('torchspin.esfit')  # the module, not the esfit() function
-    token = _FIT_DEVICES.set(['cuda:0', 'cuda:1'])
+    captured = {}
+
+    class FakePool:
+        def __init__(self, n, initializer=None, initargs=()):
+            captured['n'], captured['initargs'] = n, initargs
+
+        def terminate(self):
+            pass
+
+    class FakeCtx:
+        def Queue(self):
+            import queue
+            return queue.Queue()
+
+        def Pool(self, n, initializer=None, initargs=()):
+            return FakePool(n, initializer, initargs)
+
+    import multiprocessing as mp
+    monkeypatch.setattr(mp, 'get_context', lambda method: FakeCtx())
+    monkeypatch.setattr(E, '_POOL', None)
+    token = E._FIT_DEVICES.set(['cuda:0', 'cuda:1'])
     try:
-        E._POOL = None if E._POOL is None else (E._POOL[2].terminate() or None)
-        seen = _map_points(_visible_devices, list(range(16)), 4, 'processes')
+        E._get_pool(5, 1)
     finally:
-        _FIT_DEVICES.reset(token)
-        if E._POOL is not None:
-            E._POOL[2].terminate(); E._POOL = None
-    # the devices exist only as strings here: no GPU is needed for the assignment
-    assert set(seen) == {'0', '1'}
+        E._FIT_DEVICES.reset(token)
+        monkeypatch.setattr(E, '_POOL', None)
+    q = captured['initargs'][1]
+    assert captured['n'] == 5
+    assert [q.get_nowait() for _ in range(5)] == ['0', '1', '0', '1', '0']
+
+
+def test_worker_init_pins_cuda_visible_devices(monkeypatch):
+    """Each worker sets CUDA_VISIBLE_DEVICES from the queue before CUDA starts."""
+    import importlib
+    import os
+    import queue
+    import torch
+    E = importlib.import_module('torchspin.esfit')
+    monkeypatch.delenv('CUDA_VISIBLE_DEVICES', raising=False)
+    prev = torch.get_num_threads()
+    q = queue.Queue(); q.put('1')
+    try:
+        E._pool_init(prev, q)
+        assert os.environ['CUDA_VISIBLE_DEVICES'] == '1'
+    finally:
+        torch.set_num_threads(prev)
 
 
 def test_devices_reject_non_cuda():

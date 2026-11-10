@@ -307,9 +307,26 @@ def test_ham_ext(case_name):
 @pytest.mark.parametrize(
     "case_name", [n for n in _case_names() if _has_ho_zeeman(get_cases()[n])])
 def test_ham_ext_ho_zeeman_full(case_name):
-    """ham()/ham(B0) for systems with Sys.Ham* terms (ham_ezho folded into ham())."""
+    """ham()/ham(B0) for systems with Sys.Ham* terms (ham_ezho folded into ham()).
+
+    H0 and ham(Sys, B0) are compared with EasySpin directly. The moment operators
+    are not: EasySpin's ham.m adds the linear term dH/dB to them, so its own
+    H0 - mu.B has the opposite sign of that term to its ham(Sys, B0). torchspin
+    subtracts it (H = H0 - mu.B); the check is that torchspin's H0 - mu.B
+    reproduces EasySpin's ham(Sys, B0) for systems with linear terms only.
+    """
     case = get_cases()[case_name]
-    _check_generic(sys_from_matlab(case.Sys), case)
+    sys = sys_from_matlab(case.Sys)
+    fields = _fields(case)
+    if 'H' in fields:
+        assert_close(ham(sys, _B0(case)), case.H, 'H(B0)')
+    if 'H0' in fields and np.asarray(case.mux).dtype != object:
+        H0, mux, muy, muz = ham(sys)
+        assert_close(H0, case.H0, 'H0')
+        lB = {int(k[3]) for k in _fields(case.Sys) if k.startswith('Ham')}
+        if 'H' in fields and lB <= {0, 1}:
+            B = np.asarray(_B0(case), dtype=float).ravel()
+            assert_close(H0 - (mux * B[0] + muy * B[1] + muz * B[2]), case.H, 'H0 - mu.B vs EasySpin H(B0)')
 
 
 def test_reference_case_count():

@@ -115,9 +115,15 @@ def ham(
         muy = muy + muy_oz
         muz = muz + muz_oz
 
-    # Higher-order Zeeman terms (Sys.Ham*): EasySpin ham.m adds the zero-field
-    # part to H0 and the linear-in-B part to the moment operators; at a given
-    # field the complete ham_ezho(Sys,B0) is added instead.
+    # Higher-order Zeeman terms (Sys.Ham*): the zero-field part goes into H0 and
+    # the linear-in-B part into the moment operators; at a given field the
+    # complete ham_ezho(Sys,B0) is added instead. ham_ezho's G1 is dH/dB, and
+    # H = H0 - mu.B, so the linear part enters the moments as -G1. EasySpin's
+    # ham.m adds +G1, which flips the sign of these terms relative to
+    # ham(Sys,B0) and to every other Zeeman term; torchspin deliberately does
+    # not follow it (KNOWN_LIMITATIONS.md, "Higher-order Zeeman terms").
+    # Quadratic and cubic terms (G2, G3) are not representable as H0 - mu.B and
+    # are included only by ham(Sys, B0).
     ho_zeeman = sys.Ham is not None and any(
         bool(torch.any(v != 0)) for v in sys.Ham.values()
     )
@@ -127,9 +133,9 @@ def ham(
             from torchspin.ham_ezho import ham_ezho
             G0, G1, _, _ = ham_ezho(sys, B0=None, dtype=dtype, device=device)
             H0 = H0 + G0
-            mux = mux + G1[0]
-            muy = muy + G1[1]
-            muz = muz + G1[2]
+            mux = mux - G1[0]
+            muy = muy - G1[1]
+            muz = muz - G1[2]
         return H0, mux, muy, muz
 
     # Full Hamiltonian

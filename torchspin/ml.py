@@ -270,7 +270,15 @@ def simulate_batch(simulator, template: SpinSystem, exp, opt, spec: ParamSpec, p
         # the cached spawn pool shared with esfit: one torch thread per worker, native
         # BLAS/OpenMP pools capped, OMP_WAIT_POLICY=PASSIVE (torchspin.parallel.native_thread_env)
         pool = _get_pool(n_proc, 1)
-        res = pool.map(_worker, jobs, chunksize=max(1, n // (4 * n_proc)))
+        try:
+            res = pool.map(_worker, jobs, chunksize=max(1, n // (4 * n_proc)))
+        except KeyboardInterrupt:
+            # do not leave the shared pool working through the rest of the batch
+            import importlib
+            _ef = importlib.import_module('torchspin.esfit')
+            pool.terminate()
+            _ef._POOL = None
+            raise
         x = torch.as_tensor(res[0][0])
         return x, torch.stack([torch.as_tensor(r[1]) for r in res])
     ys, x = [], None

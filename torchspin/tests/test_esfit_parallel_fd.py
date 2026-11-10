@@ -118,3 +118,14 @@ def test_devices_reject_non_cuda():
     assert _cuda_index('cuda:1') == '1' and _cuda_index('cuda') == '0' and _cuda_index(2) == '2'
     with pytest.raises(ValueError):
         _cuda_index('cpu')
+
+
+def test_devices_do_not_leak_out_of_a_fit():
+    """FitOptions.devices applies to that fit's pools only."""
+    from torchspin.esfit import _FIT_DEVICES
+    opt = FitOptions(method='levmar', max_iter=2, compute_uncertainties=False, verbosity=0,
+                     devices=['cuda:0', 'cuda:1'])
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        esfit(_DATA, _two_lines, p0=_START, vary=_VARY, options=opt)
+    assert _FIT_DEVICES.get() is None

@@ -161,7 +161,13 @@ class FitOptions:
     # montecarlo, grid, global) evaluate each population concurrently; levmar,
     # trf, lbfgsb and the uncertainty estimate evaluate the independent
     # finite-difference probes of each Jacobian or gradient concurrently (trf
-    # and lbfgsb need SciPy >= 1.16; older SciPy runs them sequentially).
+    # and lbfgsb need SciPy >= 1.16; older SciPy runs them sequentially). For
+    # trf and lbfgsb SciPy evaluates the base point in this process and the
+    # probes in the workers, whose thread count differs; torch reductions then
+    # differ at ~1e-14, which SciPy's ~1.5e-8 relative step turns into a
+    # Jacobian error of ~1e-6 of the signal scale (measured on pepper models),
+    # far below what changes a fit. levmar and the uncertainty Jacobian evaluate
+    # the base point and all probes in the workers.
     # n_workers=1 is sequential; an int > 1 or 'auto' uses a spawned process
     # pool with the cores split between the workers (workers='auto'|'processes';
     # 'threads' forces a thread pool, which gains little because the forward
@@ -2695,121 +2701,126 @@ def esfit(
     if options.method not in ('simplex', 'lbfgsb', 'powell', 'grid', 'montecarlo', 'genetic', 'swarm', 'global', 'levmar', 'trf'):
         raise ValueError(f"Unknown method: '{options.method}'")
 
-    _FIT_DEVICES.set(list(options.devices) if options.devices else None)
-    tracker.start()
+    # FitOptions.devices for the worker pools of this fit only; reset on every exit path,
+    # so a later pool (another fit, ml.simulate_batch) is not pinned to this fit's GPUs
+    _dev_token = _FIT_DEVICES.set(list(options.devices) if options.devices else None)
     try:
-        if options.method == 'simplex':
-            opt_result = _optimize_simplex(tracked, pvec_0, (lb_vec, ub_vec), options)
-        elif options.method == 'lbfgsb':
-            opt_result = _optimize_lbfgsb(tracked, pvec_0, (lb_vec, ub_vec), options)
-        elif options.method == 'powell':
-            opt_result = _optimize_powell(tracked, pvec_0, (lb_vec, ub_vec), options)
-        elif options.method == 'grid':
-            opt_result = _optimize_grid(tracked, pvec_0, (lb_vec, ub_vec), options)
-        elif options.method == 'montecarlo':
-            opt_result = _optimize_montecarlo(tracked, pvec_0, (lb_vec, ub_vec), options)
-        elif options.method == 'genetic':
-            opt_result = _optimize_genetic(tracked, pvec_0, (lb_vec, ub_vec), options)
-        elif options.method == 'swarm':
-            opt_result = _optimize_swarm(tracked, pvec_0, (lb_vec, ub_vec), options)
-        elif options.method == 'global':
-            opt_result = _optimize_global(tracked, pvec_0, (lb_vec, ub_vec), options)
-        else:
-            # a partial of a module-level function, so it pickles for the worker pool
-            resid_fn = functools.partial(_bounded_residuals, lb=lb_vec, ub=ub_vec, data=data,
-                                         model_wrapper=model_wrapper, param_handler=param_handler,
-                                         options=worker_options)
-            local_solver = _optimize_trf if options.method == 'trf' else _optimize_levmar
-            opt_result = local_solver(tracked, pvec_0, (lb_vec, ub_vec), options, resid_fn=resid_fn)
-    except KeyboardInterrupt:
-        opt_result = tracker.synthesize_result('KeyboardInterrupt')
-    except _StopFit as e:
-        opt_result = tracker.synthesize_result(e.reason)
-    finally:
-        tracker.finish()
+        tracker.start()
+        try:
+            if options.method == 'simplex':
+                opt_result = _optimize_simplex(tracked, pvec_0, (lb_vec, ub_vec), options)
+            elif options.method == 'lbfgsb':
+                opt_result = _optimize_lbfgsb(tracked, pvec_0, (lb_vec, ub_vec), options)
+            elif options.method == 'powell':
+                opt_result = _optimize_powell(tracked, pvec_0, (lb_vec, ub_vec), options)
+            elif options.method == 'grid':
+                opt_result = _optimize_grid(tracked, pvec_0, (lb_vec, ub_vec), options)
+            elif options.method == 'montecarlo':
+                opt_result = _optimize_montecarlo(tracked, pvec_0, (lb_vec, ub_vec), options)
+            elif options.method == 'genetic':
+                opt_result = _optimize_genetic(tracked, pvec_0, (lb_vec, ub_vec), options)
+            elif options.method == 'swarm':
+                opt_result = _optimize_swarm(tracked, pvec_0, (lb_vec, ub_vec), options)
+            elif options.method == 'global':
+                opt_result = _optimize_global(tracked, pvec_0, (lb_vec, ub_vec), options)
+            else:
+                # a partial of a module-level function, so it pickles for the worker pool
+                resid_fn = functools.partial(_bounded_residuals, lb=lb_vec, ub=ub_vec, data=data,
+                                             model_wrapper=model_wrapper, param_handler=param_handler,
+                                             options=worker_options)
+                local_solver = _optimize_trf if options.method == 'trf' else _optimize_levmar
+                opt_result = local_solver(tracked, pvec_0, (lb_vec, ub_vec), options, resid_fn=resid_fn)
+        except KeyboardInterrupt:
+            opt_result = tracker.synthesize_result('KeyboardInterrupt')
+        except _StopFit as e:
+            opt_result = tracker.synthesize_result(e.reason)
+        finally:
+            tracker.finish()
     
-    pfit_vec = opt_result.x
+        pfit_vec = opt_result.x
     
-    # 7. Compute final fit and residuals
-    residuals, rmsd, info = compute_residuals(
-        pfit_vec, data, model_wrapper, param_handler, options
-    )
-    if info.get('negative_scale'):
-        warnings.warn(
-            "esfit: lsq autoscale found a negative scale at the fitted parameters "
-            "(the model is anti-correlated with the data), so the scale was "
-            f"{'clipped to 0' if options.lsq_negative_scale == 'clip' else 'replaced by its absolute value'}. "
-            "Check the sign of the model: with autoscale='lsq' it must carry the "
-            "sign of the signal.", UserWarning, stacklevel=2)
-    
-    if options.verbosity > 0:
-        print(f"\nFinal RMSD: {rmsd:.6e}")
-        if rmsd_0 > 0:
-            print(f"Improvement: {(rmsd_0 - rmsd)/rmsd_0 * 100:.1f}%")
-        print(f"Success: {opt_result.success}")
-        print(f"Message: {opt_result.message}")
-    
-    # 8. Compute uncertainties if requested
-    if options.compute_uncertainties and opt_result.success:
-        if options.verbosity > 0:
-            print("\nComputing uncertainties...")
-        uncertainties = _estimate_uncertainties(
+        # 7. Compute final fit and residuals
+        residuals, rmsd, info = compute_residuals(
             pfit_vec, data, model_wrapper, param_handler, options
         )
-    else:
-        uncertainties = {
-            'pstd': None,
-            'ci95': None,
-            'cov': None,
-            'corr': None
-        }
+        if info.get('negative_scale'):
+            warnings.warn(
+                "esfit: lsq autoscale found a negative scale at the fitted parameters "
+                "(the model is anti-correlated with the data), so the scale was "
+                f"{'clipped to 0' if options.lsq_negative_scale == 'clip' else 'replaced by its absolute value'}. "
+                "Check the sign of the model: with autoscale='lsq' it must carry the "
+                "sign of the signal.", UserWarning, stacklevel=2)
     
-    # 9. Compute fit diagnostics
-    diagnostics = _compute_fit_diagnostics(info['residuals_raw'], info['fit'], len(pfit_vec))
+        if options.verbosity > 0:
+            print(f"\nFinal RMSD: {rmsd:.6e}")
+            if rmsd_0 > 0:
+                print(f"Improvement: {(rmsd_0 - rmsd)/rmsd_0 * 100:.1f}%")
+            print(f"Success: {opt_result.success}")
+            print(f"Message: {opt_result.message}")
     
-    # 10. Construct result object
-    result = FitResult(
-        pfit=pfit_vec,
-        pnames=pnames,
-        p_start=pvec_0,
-        p_fixed=param_handler.fixed_mask,
-        fit=info['fit'],
-        fit_raw=info['sim'],
-        residuals=info['residuals_raw'],
-        scale=info['scale'],
-        baseline=info['baseline'],
-        rmsd=rmsd,
-        ssr=np.sum(residuals**2),
-        n_params=len(pfit_vec),
-        n_data=len(data),
-        algorithm=options.method,
-        n_iterations=opt_result.nit if hasattr(opt_result, 'nit') else opt_result.nfev,
-        success=opt_result.success,
-        message=opt_result.message,
-        pstd=uncertainties['pstd'],
-        ci95=uncertainties['ci95'],
-        cov=uncertainties['cov'],
-        corr=uncertainties['corr'],
-        r_squared=diagnostics['r_squared'],
-        reduced_chi_square=diagnostics['reduced_chi_square'],
-        noise_std=diagnostics['noise_std'],
-        n_evaluations=tracker.n_evaluations,
-        elapsed_s=tracker.elapsed_s,
-        interrupted=tracker.interrupted,
-    )
+        # 8. Compute uncertainties if requested
+        if options.compute_uncertainties and opt_result.success:
+            if options.verbosity > 0:
+                print("\nComputing uncertainties...")
+            uncertainties = _estimate_uncertainties(
+                pfit_vec, data, model_wrapper, param_handler, options
+            )
+        else:
+            uncertainties = {
+                'pstd': None,
+                'ci95': None,
+                'cov': None,
+                'corr': None
+            }
     
-    if options.verbosity > 0:
-        print("\nFitted parameters:")
-        for i, (name, val, std) in enumerate(zip(pnames, pfit_vec, uncertainties['pstd'] if uncertainties['pstd'] is not None else [None]*len(pfit_vec))):
-            if std is not None:
-                print(f"  {name}: {val:.6e} ± {std:.6e}")
-            else:
-                print(f"  {name}: {val:.6e}")
-        print(f"\nFit quality:")
-        print(f"  RMSD:      {result.rmsd:.6e}")
-        print(f"  R²:        {result.r_squared:.6f}")
-        print(f"  Red. χ²:   {result.reduced_chi_square:.6f}")
-        print(f"  Noise std: {result.noise_std:.6e}")
-        print()
+        # 9. Compute fit diagnostics
+        diagnostics = _compute_fit_diagnostics(info['residuals_raw'], info['fit'], len(pfit_vec))
     
-    return result
+        # 10. Construct result object
+        result = FitResult(
+            pfit=pfit_vec,
+            pnames=pnames,
+            p_start=pvec_0,
+            p_fixed=param_handler.fixed_mask,
+            fit=info['fit'],
+            fit_raw=info['sim'],
+            residuals=info['residuals_raw'],
+            scale=info['scale'],
+            baseline=info['baseline'],
+            rmsd=rmsd,
+            ssr=np.sum(residuals**2),
+            n_params=len(pfit_vec),
+            n_data=len(data),
+            algorithm=options.method,
+            n_iterations=opt_result.nit if hasattr(opt_result, 'nit') else opt_result.nfev,
+            success=opt_result.success,
+            message=opt_result.message,
+            pstd=uncertainties['pstd'],
+            ci95=uncertainties['ci95'],
+            cov=uncertainties['cov'],
+            corr=uncertainties['corr'],
+            r_squared=diagnostics['r_squared'],
+            reduced_chi_square=diagnostics['reduced_chi_square'],
+            noise_std=diagnostics['noise_std'],
+            n_evaluations=tracker.n_evaluations,
+            elapsed_s=tracker.elapsed_s,
+            interrupted=tracker.interrupted,
+        )
+    
+        if options.verbosity > 0:
+            print("\nFitted parameters:")
+            for i, (name, val, std) in enumerate(zip(pnames, pfit_vec, uncertainties['pstd'] if uncertainties['pstd'] is not None else [None]*len(pfit_vec))):
+                if std is not None:
+                    print(f"  {name}: {val:.6e} ± {std:.6e}")
+                else:
+                    print(f"  {name}: {val:.6e}")
+            print(f"\nFit quality:")
+            print(f"  RMSD:      {result.rmsd:.6e}")
+            print(f"  R²:        {result.r_squared:.6f}")
+            print(f"  Red. χ²:   {result.reduced_chi_square:.6f}")
+            print(f"  Noise std: {result.noise_std:.6e}")
+            print()
+    
+        return result
+    finally:
+        _FIT_DEVICES.reset(_dev_token)

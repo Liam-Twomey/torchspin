@@ -6,6 +6,28 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.7.4] — 2026-11-10
+
+### Added
+
+- **Zero-field frequency sweeps and fixed-field ENDOR: `Options.ZeroField`**
+  (default `False`, which leaves results unchanged). With `ZeroField=True`,
+  `pepper` frequency sweeps and `salt` fixed-field ENDOR accept
+  `Experiment.Field = 0`. Levels are grouped into degenerate clusters (Kramers
+  doublets, accidental degeneracies), and each transition carries the rate
+  summed over all level pairs between two clusters. Intensities are therefore
+  independent of the arbitrary eigenbasis inside a degenerate subspace. The
+  summing is done before slot tracking, threshold pruning and pair
+  preselection. The isotropic O3 shortcut is replaced by a D2h grid. Validated
+  against EasySpin's pepper at `Exp.Field = 0` (5 cases,
+  `ref_pepper_zerofield.mat`), closed forms (S = 1: D−E, D+E, 2E; S = 3/2:
+  2·sqrt(D²+3E²)) and the B → 0 limit. See KNOWN_LIMITATIONS.md,
+  "Pepper and salt — zero field".
+- `Experiment(Field=0)` now constructs in frequency-swept and fixed-field mode.
+  Without `ZeroField`, the same `ValueError("Experiment.Field must be positive
+  (mT).")` is raised when `pepper`, `salt`, `garlic`, `chili` or
+  `resfreqs_perturb` is called. A negative field still raises in the
+  constructor.
 ## [0.7.3] — 2026-11-10
 
 ### Added

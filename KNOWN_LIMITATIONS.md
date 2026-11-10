@@ -146,6 +146,59 @@ on a finer grid and reports what changed — the only trustworthy test, and the
 one used to produce the table above.  The two `cupc_grid19_4N_*` cases are kept in the validation suite as
 the record of this.
 
+## Pepper and salt — zero field, `Options.ZeroField` (0.7.4)
+
+`Options(ZeroField=True)` lets `pepper` frequency sweeps (zero-field EPR/FDMR) and
+`salt` fixed-field ENDOR run at `Experiment.Field = 0`. The default is unchanged in
+results, with one difference in *when* the error appears: `Experiment(Field=0, ...)`
+now constructs, and the familiar `ValueError("Experiment.Field must be positive (mT).")`
+is raised by the simulator call (`pepper`/`salt` without the option; `garlic`, `chili`
+and `resfreqs_perturb` always). A negative field still raises in the constructor.
+
+- **Degenerate levels.** At B = 0 the Hamiltonian is the same for every orientation, and
+  inside a degenerate subspace (Kramers doublets, accidental degeneracies) the eigenbasis
+  is arbitrary. The levels are therefore grouped into clusters (neighbors closer than
+  1e-9 × the level spread, at least 1e-9 MHz, are one cluster). Each transition is a pair
+  of clusters. Its rate·polarization is summed over all level pairs between the two
+  clusters, and its position is the difference of the cluster mean energies. This is done
+  before slot tracking, threshold pruning and pair preselection. Levels that are really
+  split by less than the tolerance are merged. Transitions inside a cluster have zero
+  frequency and are not returned. With `separate='transitions'` the rows are cluster pairs.
+- **Powder average.** The B1 average is taken over the powder grid directions: the
+  perpendicular-mode rate (|μ|² − |n·μ|²)/2 averages to Σ|μ|²/3. The one-orientation O3
+  shortcut is replaced by a D2h grid. The SOPHE quadrature of this quadratic form is
+  accurate to about 1e-4 at `GridSize = 19`.
+- **Strain at B = 0.** gStrain scales with B, so it vanishes. HStrain stays direction
+  dependent (HStrain² · n² over the grid directions n, as in EasySpin, even though no
+  static field defines a direction). For DStrain and AStrain each diagonal element
+  ⟨u|∂H|u⟩ is replaced by its cluster mean tr(P_a ∂H)/n_a. This is exact for Kramers
+  doublets, where time-even operators are proportional to the identity. For accidental
+  non-Kramers degeneracies it ignores the splitting the strain itself would cause.
+- **Not supported.** Non-equilibrium populations (`Sys.initState`) raise with
+  `ZeroField`. Frequency sweeps have no differentiable pepper path (`pepper_autograd`
+  raises for them, as before). The zero-field resonances from `resfreqs_batch`
+  (positions, summed intensities) are on the graph and tested against central
+  differences. Pair preselection does not drop "pure nuclear" transitions at zero field:
+  the high-field heuristic would remove the F = 0 ↔ F = 1 hyperfine line.
+- **salt.** Zero field always uses the matrix path (first-order ENDOR theory needs a
+  quantizing field) and the interpolation/projection powder average. It needs a grid with
+  more than two orientations. Line positions do not depend on orientation, so each line
+  is projected as a delta into one bin. The spectrum is therefore piecewise constant in
+  the line positions: gradients reach the parameters through the intensities, not through
+  the positions. With `ExciteWidth`, the orientation-selection weight leaves out
+  intra-cluster pairs. EasySpin's salt is not compared at zero field; the tests use
+  closed forms and a brute-force cluster sum.
+- **Validation.** pepper matches EasySpin, which accepts `Exp.Field = 0` for frequency
+  sweeps and resolves the degeneracies with the eigenvectors of μ_zL in each degenerate
+  block, on 5 cases (`ref_pepper_zerofield.mat`): cosine ≥ 0.99999999 and amplitude
+  within 4e-6, except the isotropic S = 1/2 + ¹H case (EasySpin keeps the O3 shortcut,
+  so amplitude agrees to 6e-4). Field = 0 agrees with the default path at Field = 1e-4 mT
+  to 1e-11 relative (pepper). For salt the line areas agree to 1e-7; the max-norm
+  difference is a few % because at a small field a line near a bin edge is split over
+  two bins.
+
+- `salt` with `Options.ZeroField` and `Options.Enhancement` (0.7.3) together raises `NotImplementedError`: the zero-field cluster path sums nuclear-only rates.
+
 ## Higher-order Zeeman terms (`Sys.Ham*`): deliberate deviation from EasySpin (0.6.7)
 
 `ham(Sys)` returns `(H0, mux, muy, muz)` with H(B) = H0 − μ·B. The simulators that

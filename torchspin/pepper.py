@@ -591,19 +591,27 @@ def _finish_field_sweep(spec: torch.Tensor, x: torch.Tensor, dx: float, exp,
     return out[0] if spec.ndim == 1 else torch.stack(out)
 
 
-def _preselect_pairs(H0, mux, muy, muz, sys, exp, opt, B_center, freq_sweep=False, zeeman_ho=None):
+def _preselect_pairs(H0, mux, muy, muz, sys, exp, opt, B_center, freq_sweep=False, zeeman_ho=None,
+                     zero_field=False):
     """EasySpin resfields transition pre-selection: transition rates of all level
     pairs at the center field on a small D2h grid (TPSGridSize 4); keep the pairs
     whose maximum rate reaches Opt.Threshold × the largest; pure nuclear
     transitions are dropped when the hyperfine interaction is weak
     (HFIStrength = max|A|·(I+1/2)/ν < 0.5).  Returns a list of (u, v) pairs.
     With ``zeeman_ho`` (Options.QuadraticZeeman) the eigenvectors are those of the
-    full H(B_center) including B² n·G2·n + B³ G3[n,n,n]."""
+    full H(B_center) including B² n·G2·n + B³ G3[n,n,n].
+
+    ``zero_field`` (B_center = 0, Options.ZeroField): the rates are summed over
+    degenerate level clusters before the maximum and the threshold, and the
+    pairs returned are the cluster labels of :func:`resfreqs_batch`
+    (first level of each cluster)."""
     from torchspin.excitation import excitation_geometry, exp_mw_mode
     thr = float(opt.Threshold)
     n = H0.shape[0]
     if thr <= 0:
         return None
+    if zero_field:
+        return _preselect_pairs_zero_field(H0, mux, muy, muz, sys, exp, thr)
     phi_t, theta_t, _, _ = sphgrid('D2h', 4)
     geom = excitation_geometry(exp_mw_mode(exp))
     Ex, Ey, Ez = -mux, -muy, -muz
@@ -647,6 +655,56 @@ def _preselect_pairs(H0, mux, muy, muz, sys, exp, opt, B_center, freq_sweep=Fals
     sel = keep & (max_rate > cutoff)
     ii, jj = torch.nonzero(sel, as_tuple=True)
     return [(int(a), int(b)) for a, b in zip(ii.tolist(), jj.tolist())]
+
+
+def _zf_const_pos(B_f, B_c):
+    """Zero field: a transition has the same position at every orientation.
+    Restore that exactly after interpolation, whose round-off would otherwise
+    give near-zero-width triangles that straddle a bin edge, where the
+    projection formulas cancel catastrophically (a few % of the line area)."""
+    fin = B_c[np.isfinite(B_c)]
+    if fin.size == 0:
+        return B_f
+    return np.where(np.isnan(B_f), np.nan, fin[0])
+
+
+def _preselect_pairs_zero_field(H0, mux, muy, muz, sys, exp, thr):
+    """Zero-field variant of :func:`_preselect_pairs`: H = H0 at every
+    orientation, rates summed over pairs of degenerate level clusters
+    (basis invariant), maximum over the D2h N=4 grid, threshold on the cluster
+    pairs; returns their (first level, first level) labels."""
+    from torchspin.excitation import excitation_geometry, exp_mw_mode
+    from torchspin._zerofield import level_clusters
+    phi_t, theta_t, _, _ = sphgrid('D2h', 4)
+    geom = excitation_geometry(exp_mw_mode(exp))
+    Ex, Ey, Ez = -mux, -muy, -muz
+    dev = H0.device
+    E0, V = torch.linalg.eigh(H0)
+    labels, first, onehot = level_clusters(E0)
+    oh = onehot.to(dev)
+    K = first.numel()
+    max_rate = torch.zeros(K, K, dtype=torch.float64, device=dev)
+    for ph, th in zip(phi_t.tolist(), theta_t.tolist()):
+        st, ct, sp, cp = math.sin(th), math.cos(th), math.sin(ph), math.cos(ph)
+        Exy = cp * Ex + sp * Ey
+        if geom.parallel:
+            EzL = st * Exy + ct * Ez
+            rate = (V.conj().T @ EzL @ V).abs() ** 2
+        else:
+            EyL = -sp * Ex + cp * Ey
+            ExL = ct * Exy - st * Ez
+            rate = ((V.conj().T @ ExL @ V).abs() ** 2 + (V.conj().T @ EyL @ V).abs() ** 2) / 2
+        rate_c = oh.T @ rate.real.to(torch.float64).detach() @ oh            # summed over cluster pairs
+        max_rate = torch.maximum(max_rate, rate_c)
+    keep = torch.triu(torch.ones(K, K, dtype=torch.bool, device=dev), diagonal=1)
+    # No exclusion of 'pure nuclear' transitions: at zero field the levels are
+    # not ordered by electron manifold (e.g. the F = 0 <-> F = 1 hyperfine line
+    # of S = 1/2, I = 1/2 would be dropped by the high-field heuristic).
+    rates = max_rate[keep]
+    cutoff = thr * float(rates.max()) if rates.numel() else 0.0
+    sel = keep & (max_rate > cutoff)
+    ii, jj = torch.nonzero(sel, as_tuple=True)
+    return [(int(first[a]), int(first[b])) for a, b in zip(ii.tolist(), jj.tolist())]
 
 
 def _projectzones_loop(
@@ -1069,6 +1127,8 @@ def pepper(sys_or_list, exp: Experiment, opt: Optional[Options] = None):
     * MATLAB-validated to cosine similarity > 0.999 on standard test cases.
     """
     opt_ = opt if opt is not None else Options()
+    from torchspin.experiment import require_positive_field
+    require_positive_field(exp, opt_)    # Field = 0 only with Options.ZeroField
     # Components × isotopologues (EasySpin compisoloop): every component is
     # expanded into its isotopologues (natural abundance or Sys.Abund), each
     # simulated separately and summed with weight Sys.weight·abundance.  With
@@ -1167,6 +1227,9 @@ def _pepper_single(
     # (EasySpin pepper.m): the x axis is the frequency range in GHz and the
     # resonances come from resfreqs_batch instead of resfields_batch.
     freq_sweep = bool(exp.is_freq_swept) or (exp.Field is not None and exp.mwFreq is None)
+    from torchspin.experiment import require_positive_field
+    # Exp.Field = 0 (Options.ZeroField): degenerate levels are summed in clusters
+    zero_field = require_positive_field(exp, opt) and freq_sweep
     from dataclasses import replace as _dc_replace_f
     if not freq_sweep and exp.Range is None:
         # EasySpin pepper.m: automatic field range for S=1/2 from the g and A extremes
@@ -1231,6 +1294,15 @@ def _pepper_single(
             raise ValueError('For partially ordered samples, Ci grid symmetry is required.')
     if getattr(sys, 'initState', None) is not None and grid_sym == 'Dinfh' and opt.GridSymmetry in ('auto', ''):
         grid_sym = 'D2h'
+    if zero_field:
+        if getattr(sys, 'initState', None) is not None:
+            raise ValueError('Options.ZeroField cannot be combined with non-equilibrium populations (Sys.initState).')
+        if grid_sym == 'O3':
+            # the one-orientation O3 shortcut is not used at zero field: the
+            # B1 average is taken over a real powder grid
+            grid_sym, R_sym2mol = 'D2h', torch.eye(3, dtype=torch.float64)
+            if opt.Verbosity >= 1:
+                print("pepper: zero field, O3 grid replaced by D2h")
 
     # -----------------------------------------------------------------------
     # Step 1: Build field-independent Hamiltonian and moment operators
@@ -1349,9 +1421,13 @@ def _pepper_single(
     _pt_ok = init_state is None and not freq_sweep
     from dataclasses import replace as _dc_replace_o
     _opt_rf = _dc_replace_o(opt, Threshold=0.0)   # slot-based paths pre-select transitions globally (EasySpin)
-    _pairs_sel = _preselect_pairs(*_ham_ops(), ham_sys, exp, opt,
-                                  float(exp.Field) if freq_sweep else 0.5 * (exp.Range[0] + exp.Range[1]),
-                                  freq_sweep=freq_sweep, zeeman_ho=_zho) if not str(opt.Method).startswith('perturb') else None
+    if zero_field:
+        _pairs_sel = _preselect_pairs(*_ham_ops(), ham_sys, exp, opt, 0.0, freq_sweep=True,
+                                      zero_field=True) if not str(opt.Method).startswith('perturb') else None
+    else:
+        _pairs_sel = _preselect_pairs(*_ham_ops(), ham_sys, exp, opt,
+                                      float(exp.Field) if freq_sweep else 0.5 * (exp.Range[0] + exp.Range[1]),
+                                      freq_sweep=freq_sweep, zeeman_ho=_zho) if not str(opt.Method).startswith('perturb') else None
 
     # Opt.separate='transitions': one spectrum row per transition slot (EasySpin
     # nSpectra = nTransitions).  Rows are collected per slot by _acc and, for the
@@ -1412,6 +1488,8 @@ def _pepper_single(
         if _zho is not None:
             kw['zeeman_ho'] = _zho
         if freq_sweep:
+            if zero_field:
+                kw['zero_field'] = True
             return resfreqs_batch(*_ham_ops(), phi_b, theta_b, exp_, opt_, ham_sys, **kw)
         if hybrid_info is not None:
             kw['hybrid'] = hybrid_info
@@ -1735,6 +1813,8 @@ def _pepper_single(
                 B_f = _interp_slot(B_c, grid_sym, N_coarse, nfKnots, vecs_sym_c, vecs_sym_f_s, any_nan=_any_nan)
                 if B_f is None:
                     continue
+                if zero_field:
+                    B_f = _zf_const_pos(B_f, B_c)
                 I_f = _interp_slot(I_c, grid_sym, N_coarse, nfKnots, vecs_sym_c, vecs_sym_f_s, mode='val')
                 W_f = _interp_slot(W_c, grid_sym, N_coarse, nfKnots, vecs_sym_c, vecs_sym_f_s, mode='val')
             else:
@@ -1885,6 +1965,8 @@ def _pepper_single(
                     B_f = _interp_slot(B_c, grid_sym, N_coarse, nfKnots, vecs_sym_c, vecs_sym_f, any_nan=_any_nan)
                     if B_f is None:
                         continue
+                    if zero_field:
+                        B_f = _zf_const_pos(B_f, B_c)
                     I_f = _interp_slot(I_c, grid_sym, N_coarse, nfKnots, vecs_sym_c, vecs_sym_f, mode='val')
 
                     if use_proj:

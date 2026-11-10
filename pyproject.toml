@@ -52,6 +52,9 @@ fit = ["cloudpickle>=2.0"]          # process-pool esfit with notebook-defined m
 gui = ["ipywidgets>=7.6", "matplotlib>=3.6", "ipympl>=0.9", "ipython>=7", "cloudpickle>=2.0"]   # interactive fitting panel (torchspin.fitgui)
 test = ["pytest>=7", "pytest-cov", "matplotlib>=3.6", "cloudpickle>=2.0", "ipywidgets>=7.6"]
 dev = ["pytest>=7", "pytest-cov", "build", "twine", "matplotlib>=3.6", "cloudpickle>=2.0", "ipywidgets>=7.6"]
+doc = ["sphinx","pydata_sphinx_theme","sphinx_copybutton","sphinx_design"]
+#cpu = ["pytorch@https://download.pytorch.org/whl/cpu"] #  >= 2.0,<3 "]
+all = ["torchspin[plot,fit,gui,test,dev,doc]"]
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -67,3 +70,14 @@ markers = [
     "slow: long-running stochastic tests; deselect with -m \"not slow\"",
     "requires_matlab_data: reserved; not currently applied to any test. The MATLAB\n    reference .mat files ship with the repository, so the cross-validation suite\n    runs by default -- select it by name with -k matlab_validation.",
 ]
+
+[tool.ruff] # add rules for easy ruff code checking
+target-version = "py314"
+indent-width = 4 
+line-length = 88
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
+docstring-code-line-length = 80

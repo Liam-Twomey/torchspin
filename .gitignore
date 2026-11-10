@@ -10,6 +10,7 @@ __pycache__/
 .pytest_cache/
 .venv/
 *.egg-info/
+uv.lock
 
 # build artifacts
 dist/
@@ -22,3 +23,6 @@ examples/**/*.png
 # local scratch
 scratch/
 .research_workspace/
+
+# docs
+*build/

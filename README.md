@@ -156,6 +156,16 @@ print('dL/dg:', g.grad)
 
 ---
 
+## Documentation
+
+Documentation is in the `docs/` folder. Some is as standalone markdown files,
+but the functions within torchspin are documented by ``sphinx``. To build this
+documentation, install torchspin with the `doc` group of optional dependencies,
+and run ``make clean html`` in the `docs/` directory. The docs can then be
+accessed by opening ``docs/build/html/index.html`` in a browser.
+
+---
+
 ## Units and conventions
 
 These match EasySpin, so parameters transfer directly:

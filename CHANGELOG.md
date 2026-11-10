@@ -6,62 +6,74 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
-Work toward v1.0 performance on branch `dev/v1-acceleration`; see
-`docs/v1_acceleration/ROADMAP.md`.
+## [0.7.0] — 2026-11-09
 
-### Changed — behavior differs from 0.6.2
+CPU-parallel fitting and data generation. Default behavior (`n_workers=1`,
+`simulate_batch(workers=0)`) is unchanged; no physics code changed.
 
-- **`esfit(..., n_workers='auto')`** counts the cores the process may use (CPU
-  affinity, then `SLURM_CPUS_PER_TASK`, then `os.cpu_count()`), not every core
-  on the machine. Inside a batch allocation or under `taskset` it no longer
-  starts more workers than there are cores.
+### Changed — behavior differs from 0.6.6
+
+- **`FitOptions.n_workers` now also applies to levmar, trf, lbfgsb and the
+  uncertainty estimate of every method**, not only to the population methods.
+  A script that already set `n_workers='auto'` (or an integer > 1) for one of
+  these methods used to get no parallelism; it now starts spawned worker
+  processes, which needs the usual `if __name__ == '__main__':` guard around
+  the code that runs the fit.
 
 ### Added
 
-- **`torchspin.ml.simulate_batch` reuses its worker pool.** It used to start
-  and stop a pool of spawned processes on every call. Each worker imports
-  torch, so for typical batch sizes the start-up cost outweighed the parallel
-  speedup (8 workers ran slower than one process). It now uses the pool that
-  esfit caches, started on the first call, and sends rows in chunks. Cu(II),
-  8 workers on a laptop: 31 → 249 spectra/s (one process: 55). `workers='auto'`
-  sizes the pool by the allocated cores and the available memory.
 - **Parallel finite differences in esfit.** With `FitOptions(n_workers > 1)`
-  (or `'auto'`), the independent finite-difference probes now run in the worker
-  pool: levmar's initial Jacobian (n + 1 calls), every trf Jacobian and
-  L-BFGS-B gradient (n calls each, through SciPy's `workers=`, SciPy ≥ 1.16)
-  and the uncertainty Jacobian (2n calls). Probe points, recording order and
-  evaluation counts are unchanged, so a deterministic model gives the same fit.
-  `n_workers` used to apply to population methods only; the default `1` keeps
-  everything sequential. On an 8-thread laptop the 4-parameter pepper fit
-  benchmarks took 1.47 → 1.02 s (levmar) and 1.55 → 0.84 s (trf).
-  The uncertainty Jacobian no longer evaluates an unused base point.
-- `torchspin.parallel`: one CPU thread budget shared by esfit's worker pools and
-  the inner pools of `torchspin._linalg` (batched eigendecomposition, chunked
-  accumulation). It provides:
-  - `cpu_budget()`;
-  - the `thread_budget(n)` context manager, which caps inner pools per thread,
-    and BLAS too with `blas=True` when `threadpoolctl` is installed;
-  - `native_thread_env(n)` for spawned workers.
-
-  esfit's process backend uses it to size each worker; the thread backend
-  deliberately does not (native thread counts are process-wide, and a per-worker
-  budget there measured 2.1× slower).
+  or `'auto'`, the independent finite-difference probes run in the worker pool:
+  levmar's initial Jacobian (n + 1 calls), every trf Jacobian and L-BFGS-B
+  gradient (n calls each, through SciPy's `workers=`, SciPy ≥ 1.16; older SciPy
+  runs them sequentially with a warning) and the uncertainty Jacobian (2n
+  calls). Probe points, recording order and evaluation counts are unchanged, so
+  a model with deterministic output gives the same fit. For trf and lbfgsb,
+  SciPy evaluates the base point in the main process and the probes in workers
+  with fewer threads; torch round-off then differs at ~1e-14, which shows up as
+  a ~1e-6 relative Jacobian difference, far below what changes a fit. Measured
+  on a 224-core cluster node (4-parameter pepper fit, 8–64 threads): levmar
+  1.6–1.7×, trf 2.6–3.2× faster. The uncertainty Jacobian no longer evaluates
+  an unused base point.
+- **`FitOptions.devices`**, e.g. `['cuda:0', 'cuda:1']`: process workers are
+  pinned to these GPUs round-robin (`CUDA_VISIBLE_DEVICES` per worker), so a
+  model with `device='cuda'` runs on its own GPU.
+- **`torchspin.ml.simulate_batch` reuses its worker pool** (shared with esfit)
+  instead of starting one per call, sends rows in chunks, and accepts
+  `workers='auto'`. Cu(II) on a 64-core node: 197 → 1473 spectra/s with 64
+  workers (one process: 42; one A100 GPU: 76). An interrupted batch terminates
+  the pool.
+- **`torchspin.parallel`** (public): `cpu_budget()` (CPU affinity, then SLURM,
+  then the machine), `inner_threads()`, the `thread_budget(n)` context manager
+  (caps torchspin's inner pools, and BLAS with `blas=True` when `threadpoolctl`
+  is installed) and `native_thread_env(n)` for spawned workers (also passes
+  `OMP_WAIT_POLICY=PASSIVE`).
 - Optional extra `[hpc]` (`threadpoolctl`, `cloudpickle`).
+- Docs: `docs/pitfalls.md`, "Training sets of large spin systems" (orientation
+  symmetry and `Options.Threshold`: for Cu(II) with two ¹⁴N, `Threshold=1e-2`
+  was 3.6× faster with a 0.4 % spectrum change).
 - Benchmarks:
-  - end-to-end esfit workloads (levmar, swarm with process and thread
-    backends, a nested-parallelism case);
+  - end-to-end esfit workloads (levmar and trf, sequential and with process
+    workers; swarm with process and thread backends; a nested-parallelism case);
+  - `benchmarks/workloads/ml_throughput.py` (spectra per second of
+    `simulate_batch`);
   - `benchmarks/analysis/compare_baseline.py`, which saves host-free baselines
     and flags regressions;
   - a generic SLURM job-array template, `benchmarks/cluster/slurm_array_template.sbatch`;
-  - `run_workloads.py --save-outputs`.
+  - `run_workloads.py --save-outputs`;
+  - `docs/v1_acceleration/`: the acceleration review and roadmap with the
+    measurement log.
 
 ### Fixed
 
-- `benchmarks/workloads/run_workloads.py --threads N` now overwrites the native
-  thread variables. With an inherited `OMP_NUM_THREADS` (as batch scripts set
-  it), "1-thread" runs used to keep every core in the native pools. It also
-  caps Apple Accelerate (`VECLIB_MAXIMUM_THREADS`). `--procs` starts its
-  process pool once, outside the timed replicates.
+- `benchmarks/workloads/run_workloads.py`:
+  - `--threads N` now overwrites the native thread variables. With an
+    inherited `OMP_NUM_THREADS` (as batch scripts set it), "1-thread" runs used
+    to keep every core in the native pools.
+  - It also caps Apple Accelerate (`VECLIB_MAXIMUM_THREADS`).
+  - `--procs` starts its process pool once, outside the timed replicates.
+  - A failing workload is recorded instead of aborting the run.
+  - It imports torchspin before torch and records `OMP_WAIT_POLICY`.
 
 ### Removed
 

@@ -56,6 +56,8 @@ deterministically for a given seed) and the differentiable losses
   about 0.5 GB of memory each and never more than half the free memory;
   `pip install "torchspin[fit]"` for models defined in notebooks).
 - GPU: `Options(device='cuda')`; worthwhile for autograd and batched fitting, not for single simulations.
+- Thread and process budgets: `torchspin.parallel` (`cpu_budget()`, `thread_budget(n)`, `native_thread_env(n)`)
+  for code that runs torchspin inside its own worker pools.
 - Progress and early stop: `FitOptions(progress='text', max_time=…)`; a kernel interrupt returns the best
   fit so far.
 

@@ -53,6 +53,7 @@ def resfields_batch(
     R_batch: Optional[torch.Tensor] = None,
     pairs: Optional[list] = None,
     hybrid: Optional[dict] = None,
+    zeeman_ho: Optional[tuple] = None,
 ) -> tuple:
     """Find resonance fields for a batch of orientations (vectorized).
 
@@ -71,6 +72,13 @@ def resfields_batch(
         nuclei treated perturbationally), ``n_equiv`` (``SpinSystem.n``) and
         ``int_threshold``.  Each core line is replaced by the nuclear sub-lines
         of :func:`torchspin.resfields_hybrid.hybrid_sublines`.
+    zeeman_ho:
+        ``Options.QuadraticZeeman``: ``(G2, G3)`` from
+        :func:`torchspin.ham_ezho.field_nonlinear_zeeman_ops` (either may be
+        None).  The Hamiltonian becomes H(B) = H0 − B muzL + B² Q2 + B³ Q3 with
+        Q2 = n·G2·n and Q3 = G3[n,n,n]; level slopes, Newton polish, dB/dE and
+        strain widths use dH/dB = −muzL + 2B Q2 + 3B² Q3.  ``None`` (default):
+        H(B) = H0 − B muzL exactly as before.
 
     Returns
     -------
@@ -107,6 +115,38 @@ def resfields_batch(
     # muzL: (M, dim, dim)  — H(B) = H0 - B * muzL[m]
     muzL = n_x * mux.unsqueeze(0) + n_y * muy.unsqueeze(0) + n_z * muz.unsqueeze(0)
 
+    # Field-quadratic/cubic Zeeman terms (Options.QuadraticZeeman): per-orientation
+    # Q2 = n·G2·n and Q3 = G3[n,n,n], H(B) = H0 - B muzL + B² Q2 + B³ Q3.
+    Q2 = Q3 = None
+    if zeeman_ho is not None:
+        if hybrid is not None:
+            raise NotImplementedError("Options.Method='hybrid' does not support "
+                                      "Options.QuadraticZeeman=True with lB >= 2 Sys.Ham terms.")
+        from torchspin.ham_ezho import project_field_nonlinear_zeeman
+        nvec = torch.stack([n_x.view(M), n_y.view(M), n_z.view(M)], dim=1)
+        Q2, Q3 = project_field_nonlinear_zeeman(zeeman_ho, nvec)
+        Q2 = Q2.to(device=dev, dtype=muzL.dtype) if Q2 is not None else None
+        Q3 = Q3.to(device=dev, dtype=muzL.dtype) if Q3 is not None else None
+    has_ho = Q2 is not None or Q3 is not None
+
+    def _ho_H(Bb: torch.Tensor, idx=None):
+        """Nonlinear part B² Q2 + B³ Q3 for fields Bb broadcast as (..., 1, 1)."""
+        out = 0.0
+        if Q2 is not None:
+            out = out + Bb ** 2 * (Q2 if idx is None else Q2[idx])
+        if Q3 is not None:
+            out = out + Bb ** 3 * (Q3 if idx is None else Q3[idx])
+        return out
+
+    def _ho_dH(Bb: torch.Tensor, idx=None):
+        """Field derivative of the nonlinear part, 2B Q2 + 3B² Q3."""
+        out = 0.0
+        if Q2 is not None:
+            out = out + 2.0 * Bb * (Q2 if idx is None else Q2[idx])
+        if Q3 is not None:
+            out = out + 3.0 * Bb ** 2 * (Q3 if idx is None else Q3[idx])
+        return out
+
     # ── Step 2: Segment model of the level diagram (EasySpin resfields.m) ──────
     # Energies E(B) and slopes dE/dB = -<n|μzL|n> at a set of field knots define a
     # cubic Hermite model of every transition energy on each segment.  Knots are
@@ -131,9 +171,25 @@ def resfields_batch(
         for b0 in range(0, Bk.numel(), per):
             Bc = Bk[b0:b0 + per]
             H = H0.unsqueeze(0).unsqueeze(0) - Bc.view(1, -1, 1, 1) * muzL.unsqueeze(1)
+            if has_ho:
+                Bb = Bc.view(1, -1, 1, 1)
+                Q2u = Q2.unsqueeze(1) if Q2 is not None else None
+                Q3u = Q3.unsqueeze(1) if Q3 is not None else None
+                if Q2u is not None:
+                    H = H + Bb ** 2 * Q2u
+                if Q3u is not None:
+                    H = H + Bb ** 3 * Q3u
             E, V = eigh(H)
             Es.append(E)
-            Ds.append(-(V.conj() * (muzL_c.unsqueeze(1) @ V)).sum(dim=-2).real)
+            if has_ho:
+                dH = -muzL_c.unsqueeze(1)
+                if Q2u is not None:
+                    dH = dH + 2.0 * Bb * Q2u
+                if Q3u is not None:
+                    dH = dH + 3.0 * Bb ** 2 * Q3u
+                Ds.append((V.conj() * (dH @ V)).sum(dim=-2).real)
+            else:
+                Ds.append(-(V.conj() * (muzL_c.unsqueeze(1) @ V)).sum(dim=-2).real)
             del H, V
         return torch.cat(Es, dim=1), torch.cat(Ds, dim=1)
 
@@ -243,8 +299,13 @@ def resfields_batch(
                 sl = slice(c0, c0 + per)
                 Bv, mv, pv = B_c[sl], m_c[sl], p_c[sl]
                 H = H0.unsqueeze(0) - Bv.view(-1, 1, 1) * muzL[mv]
+                if has_ho:
+                    H = H + _ho_H(Bv.view(-1, 1, 1), mv)
                 E_v, V_v = eigh(H)
-                dE = -(V_v.conj() * (muzL_c[mv] @ V_v)).sum(dim=-2).real
+                if has_ho:
+                    dE = (V_v.conj() * ((_ho_dH(Bv.view(-1, 1, 1), mv) - muzL_c[mv]) @ V_v)).sum(dim=-2).real
+                else:
+                    dE = -(V_v.conj() * (muzL_c[mv] @ V_v)).sum(dim=-2).real
                 ii = pair_i_arr[pv]; jj = pair_j_arr[pv]
                 r = torch.arange(Bv.numel(), device=dev)
                 f_v = E_v[r, jj] - E_v[r, ii] - mwFreq_MHz
@@ -349,8 +410,10 @@ def resfields_batch(
 
     # Aasa-Vänngård frequency-to-field factor dBdE = 1/|<j|μzL|j> - <i|μzL|i>|
     # (mT/MHz; EasySpin resfields.m "general form of the famous 1/g factor")
-    muzL_ii = (psi_i.conj() * torch.bmm(muzL_bk, psi_i.unsqueeze(-1)).squeeze(-1)).sum(dim=-1).real
-    muzL_jj = (psi_j.conj() * torch.bmm(muzL_bk, psi_j.unsqueeze(-1)).squeeze(-1)).sum(dim=-1).real
+    # With QuadraticZeeman the slope operator is -dH/dB = muzL - 2B Q2 - 3B² Q3 at B_res.
+    slope_op = muzL_bk - _ho_dH(B_res_all.view(-1, 1, 1).to(rdtype), m_idx) if has_ho else muzL_bk
+    muzL_ii = (psi_i.conj() * torch.bmm(slope_op, psi_i.unsqueeze(-1)).squeeze(-1)).sum(dim=-1).real
+    muzL_jj = (psi_j.conj() * torch.bmm(slope_op, psi_j.unsqueeze(-1)).squeeze(-1)).sum(dim=-1).real
     slope = (muzL_jj - muzL_ii).abs()
     dBdE = torch.where(slope > 1e-5, 1.0 / slope, torch.ones_like(slope))
     intensities_all = intensities_all * dBdE
@@ -416,6 +479,8 @@ def resfields_batch(
                 pairs_list=None,
                 mwFreq=exp.mwFreq,
                 pairs_flat=torch.stack([pi_bk, pj_bk], dim=1),
+                **({'ho_batch': (Q2[m_idx] if Q2 is not None else None,
+                                 Q3[m_idx] if Q3 is not None else None)} if has_ho else {}),
             ).reshape(-1)
         elif _has_any_strain(sys):
             widths_flat = torch.zeros(0, dtype=rdtype, device=dev)

@@ -191,6 +191,7 @@ def compute_strain_widths_batch(
     pairs_list: Optional[list], # M items, each (nTrans_m, 2) int tensor or None
     mwFreq: float,              # GHz
     pairs_flat: Optional[torch.Tensor] = None,   # (M, 2): exactly one transition per orientation
+    ho_batch: Optional[tuple] = None,            # (Q2, Q3), each (M, n, n) or None: Options.QuadraticZeeman
 ) -> list:
     """Vectorized strain widths for a batch of M orientations.
 
@@ -203,6 +204,10 @@ def compute_strain_widths_batch(
 
     With ``pairs_flat`` (one transition per orientation, the resfields_batch
     call pattern) the widths are returned as a single ``(M,)`` tensor.
+
+    With ``ho_batch = (Q2, Q3)`` (``Options.QuadraticZeeman``) the Hamiltonian at
+    B0 is H0 − B0 muzL + B0² Q2 + B0³ Q3 and dB/dE uses the slope operator
+    muzL − 2 B0 Q2 − 3 B0² Q3.
 
     Returns
     -------
@@ -223,11 +228,22 @@ def compute_strain_widths_batch(
 
     # --- Batched eigh at B0 for all M orientations ---
     H_b = H0.unsqueeze(0) - B0_batch[:, None, None] * muzL_batch  # (M, n, n)
+    slope_batch = muzL_batch
+    if ho_batch is not None:
+        Bb = B0_batch.to(torch.float64)[:, None, None]
+        Q2, Q3 = ho_batch
+        if Q2 is not None:
+            H_b = H_b + Bb ** 2 * Q2
+            slope_batch = slope_batch - 2.0 * Bb * Q2
+        if Q3 is not None:
+            H_b = H_b + Bb ** 3 * Q3
+            slope_batch = slope_batch - 3.0 * Bb ** 2 * Q3
     _, V_b = _eigh(H_b)  # (M, n, n)
 
     # --- muzL diagonal in eigenbasis: (M, n) ---
     # diag_k(V^† muzL V) = (V.conj() * (muzL @ V)).sum(dim=-2)
-    tmp = muzL_batch @ V_b                              # (M, n, n)
+    # (with QuadraticZeeman: the slope operator -dH/dB in place of muzL)
+    tmp = slope_batch @ V_b                             # (M, n, n)
     muzL_diag = torch.real((V_b.conj() * tmp).sum(dim=1))  # (M, n)
 
     # --- Precompute orientation-independent strain matrices ---
@@ -658,6 +674,7 @@ def compute_strain_widths_freq_batch(
     theta_batch: torch.Tensor,  # (M,)
     B0: float,                  # static field (mT), the same for all orientations
     pairs_list: list,           # M items, each (nTrans_m, 2) int tensor or None
+    ho_batch: Optional[tuple] = None,   # (Q2, Q3), each (M, n, n) or None: Options.QuadraticZeeman
     clusters: Optional[torch.Tensor] = None,   # (n,) degenerate-cluster label per level (zero field)
 ) -> list:
     """Frequency-domain strain widths (MHz) for frequency-swept spectra.
@@ -685,6 +702,13 @@ def compute_strain_widths_freq_batch(
     th = theta_batch.to(device=device, dtype=torch.float64)
     zLab_M = torch.stack([torch.sin(th) * torch.cos(ph), torch.sin(th) * torch.sin(ph), torch.cos(th)], dim=1)
     H_b = H0.unsqueeze(0) - float(B0) * muzL_batch
+    if ho_batch is not None:
+        # QuadraticZeeman: eigenvectors of the full H(B0); the g-strain term below
+        # keeps the linear moment (g strain perturbs the linear Zeeman term only)
+        if ho_batch[0] is not None:
+            H_b = H_b + float(B0) ** 2 * ho_batch[0]
+        if ho_batch[1] is not None:
+            H_b = H_b + float(B0) ** 3 * ho_batch[1]
     _, V_b = _eigh(H_b)
     V_c = V_b.to(torch.complex128)
 

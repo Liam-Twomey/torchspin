@@ -115,6 +115,17 @@ def resfreqs_matrix(
     # Diagonalize H at fixed B
     # -----------------------------------------------------------------------
     H = H0 - B * muzL
+    if opt is not None and bool(getattr(opt, 'QuadraticZeeman', False)):
+        # Options.QuadraticZeeman: add the field-quadratic/cubic Sys.Ham terms at B·n
+        from torchspin.ham_ezho import field_nonlinear_zeeman_ops, project_field_nonlinear_zeeman
+        _zho = field_nonlinear_zeeman_ops(sys, dtype=H.dtype, device=H.device)
+        if _zho is not None:
+            nv = torch.tensor([[sin_th * cos_ph, sin_th * sin_ph, cos_th]], dtype=torch.float64)
+            Q2, Q3 = project_field_nonlinear_zeeman(_zho, nv)
+            if Q2 is not None:
+                H = H + float(B) ** 2 * Q2[0]
+            if Q3 is not None:
+                H = H + float(B) ** 3 * Q3[0]
     E, V = _eigh(H)  # E sorted ascending, V[:,k] = eigenvector k
 
     # -----------------------------------------------------------------------
@@ -231,6 +242,7 @@ def resfreqs_batch(
     photo_weights: Optional[torch.Tensor] = None,
     R_batch: Optional[torch.Tensor] = None,
     pairs: Optional[list] = None,
+    zeeman_ho: Optional[tuple] = None,
     zero_field: bool = False,
 ) -> tuple:
     """Resonance frequencies for a batch of orientations at fixed ``exp.Field``
@@ -245,6 +257,10 @@ def resfreqs_batch(
       infinite-temperature (``1/∏(2I+1)``) polarization;
     * strain widths in GHz from :func:`compute_strain_widths_freq_batch`;
     * a relative intensity threshold ``opt.Threshold`` on |intensity|.
+
+    With ``zeeman_ho = (G2, G3)`` (``Options.QuadraticZeeman``, from
+    :func:`torchspin.ham_ezho.field_nonlinear_zeeman_ops`) the Hamiltonian at the
+    fixed field is H0 − B muzL + B² n·G2·n + B³ G3[n,n,n].
 
     Returns ``(pos_list, intens_list, widths_list[, pairs_list])`` with one
     tensor per orientation.
@@ -267,6 +283,7 @@ def resfreqs_batch(
     zL = torch.stack([torch.sin(th) * torch.cos(ph), torch.sin(th) * torch.sin(ph), torch.cos(th)], dim=1)  # (M,3)
     zc = zL.to(dtype=mux.dtype)
     muzL_b = zc[:, 0, None, None] * mux + zc[:, 1, None, None] * muy + zc[:, 2, None, None] * muz  # (M,n,n)
+    ho_b = None
     n = H0.shape[0]
     zf = None
     if zero_field:
@@ -293,6 +310,16 @@ def resfreqs_batch(
                   iu_c=first[ua], ju_c=first[ub])
     else:
         H_b = H0.unsqueeze(0) - B0 * muzL_b
+        if zeeman_ho is not None:
+            from torchspin.ham_ezho import project_field_nonlinear_zeeman
+            Q2, Q3 = project_field_nonlinear_zeeman(zeeman_ho, zL)
+            Q2 = Q2.to(device=dev, dtype=H_b.dtype) if Q2 is not None else None
+            Q3 = Q3.to(device=dev, dtype=H_b.dtype) if Q3 is not None else None
+            if Q2 is not None:
+                H_b = H_b + B0 ** 2 * Q2
+            if Q3 is not None:
+                H_b = H_b + B0 ** 3 * Q3
+            ho_b = (Q2, Q3)
         E_b, V_b = _eigh(H_b)
         if pairs is not None:
             iu = torch.tensor([p_[0] for p_ in pairs], dtype=torch.long, device=dev)
@@ -383,7 +410,8 @@ def resfreqs_batch(
                 w = compute_strain_widths_freq_batch(sys, H0, muzL_b, ph, th, B0, pairs_list,
                                                      clusters=zf['labels'])
             else:
-                w = compute_strain_widths_freq_batch(sys, H0, muzL_b, ph, th, B0, pairs_list)
+                w = compute_strain_widths_freq_batch(sys, H0, muzL_b, ph, th, B0, pairs_list,
+                                                     **({'ho_batch': ho_b} if ho_b is not None else {}))
             wid_list = [None if x is None else x * 1e-3 for x in w]
     if return_pairs:
         return pos_list, int_list, wid_list, pairs_list

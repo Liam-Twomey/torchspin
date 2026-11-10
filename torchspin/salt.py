@@ -299,6 +299,9 @@ def salt(
     # Exp.Field = 0 (Options.ZeroField): zero-field ENDOR, degenerate levels summed in clusters
     zero_field = require_positive_field(exp, opt)
 
+    from torchspin.ham_ezho import check_quadratic_zeeman_unsupported
+    check_quadratic_zeeman_unsupported(sys, opt, 'salt')
+
     # ── Frequency axis ─────────────────────────────────────────────────────
     if freq_range is None:
         f_lo, f_hi = 0.0, 2.0 * exp.mwFreq * 1e3  # MHz

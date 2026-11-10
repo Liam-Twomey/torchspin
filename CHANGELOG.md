@@ -6,6 +6,31 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.7.5] — 2026-11-10
+
+### Added
+
+- **`Options.Transitions` selects the transitions `pepper` simulates, like
+  EasySpin's `Opt.Transitions`.** `None` (the default) keeps the automatic
+  transition pre-selection with `Opt.Threshold`, so default spectra are
+  unchanged (bit-identical). `'all'` takes every level pair u < v with neither
+  the pre-selection nor the `Threshold` intensity post-selection (EasySpin sets
+  its post-selection threshold to zero for `'all'`), which recovers weak lines
+  that the default drops, such as the half-field ΔmS = 2 line of a triplet with
+  small D. A list of 1-based level pairs `(u, v)`, levels numbered by ascending
+  energy at the resonance field, takes exactly those transitions: pairs are
+  normalized to u < v, duplicates are removed, and out-of-range indices, u = v,
+  non-integers and empty lists raise `ValueError` (EasySpin silently drops
+  out-of-range rows and keeps duplicates). Within a list the `Threshold`
+  post-selection still applies, as in EasySpin. Supported on every matrix path
+  of `pepper` (powder projection, strain summation, interpolation, crystals,
+  the isotropic O3 path, frequency sweeps including the automatic range, and
+  `Method='hybrid'`, where levels are those of the exact core) and in
+  `pepper_autograd` (gradients flow as before; the pair list is a constant).
+  `Method='perturb*'` raises when `Transitions` is set (EasySpin ignores the
+  option there). Validated against EasySpin on 9 cases
+  (`tests/data/ref_pepper_transitions.mat`).
+
 ## [0.7.0] — 2026-11-09
 
 CPU-parallel fitting and data generation. Default behavior (`n_workers=1`,

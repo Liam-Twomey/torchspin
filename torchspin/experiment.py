@@ -5,7 +5,7 @@ Mirrors EasySpin's ``Exp`` and ``Opt`` structs for CW EPR powder simulation.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 
 
 @dataclass
@@ -263,6 +263,18 @@ class Options:
     Threshold:
         Relative intensity cutoff for transitions.  Transitions with
         intensity below ``Threshold * max_intensity`` are discarded.
+    Transitions:
+        :func:`pepper` / :func:`~torchspin.pepper_autograd.pepper_autograd`
+        only (EasySpin ``Opt.Transitions``).  ``None`` (default): automatic
+        transition pre-selection with ``Threshold``.  ``'all'``: every level
+        pair ``u < v``, with neither pre-selection nor the ``Threshold``
+        intensity post-selection.  A list of 1-based level pairs ``(u, v)``
+        (levels numbered by ascending energy at the resonance field, as in
+        EasySpin): exactly those transitions; pairs are normalized to ``u < v``
+        and duplicates removed; the ``Threshold`` post-selection still applies
+        within the list, as in EasySpin.  With ``Method='hybrid'`` the levels
+        are those of the exactly treated core.  Not available with
+        ``Method='perturb*'`` (raises).
     Verbosity:
         Output verbosity: 0 = silent, 1 = progress, 2 = detailed.
     BatchSize:
@@ -289,6 +301,7 @@ class Options:
     Stretch: float = 0.25             # automatic sweep range padding factor (EasySpin garlic Opt.Stretch)
     ModellingAccuracy: float = 2e-6   # resonance search: segment-model accuracy relative to mwFreq (EasySpin Opt.ModellingAccuracy)
     device: str = 'cpu'
+    Transitions: Union[str, List[Tuple[int, int]], None] = None   # EasySpin Opt.Transitions: None, 'all' or 1-based (u, v) pairs
 
     @property
     def grid_size_coarse(self) -> int:

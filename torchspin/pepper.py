@@ -638,6 +638,61 @@ def _preselect_pairs(H0, mux, muy, muz, sys, exp, opt, B_center, freq_sweep=Fals
     return [(int(a), int(b)) for a, b in zip(ii.tolist(), jj.tolist())]
 
 
+def _user_transitions(transitions, n_states):
+    """Resolve ``Options.Transitions`` (EasySpin ``Opt.Transitions``).
+
+    ``None`` → ``(None, False)`` (automatic pre-selection).  ``'all'`` → every
+    level pair ``u < v`` and ``True`` (no intensity post-selection, as EasySpin
+    sets its post-selection threshold to zero).  A list of 1-based level pairs
+    ``(u, v)`` (levels ordered by energy at the resonance field) is validated
+    (``1 <= u, v <= n_states``, ``u != v``), normalized to ``u < v``, stripped of
+    duplicates (first occurrence kept, order otherwise unchanged) and returned
+    0-based with ``False`` (Opt.Threshold post-selection still applies)."""
+    if transitions is None:
+        return None, False
+    if isinstance(transitions, str):
+        if transitions.strip().lower() != 'all':
+            raise ValueError("Options.Transitions must be None, 'all' or a list of 1-based "
+                             f"level pairs (u, v); got {transitions!r}.")
+        return [(i, j) for i in range(n_states) for j in range(i + 1, n_states)], True
+    if isinstance(transitions, torch.Tensor):
+        transitions = transitions.detach().cpu().numpy()
+    if isinstance(transitions, np.ndarray):
+        transitions = transitions.tolist()
+    try:
+        rows = list(transitions)
+    except TypeError:
+        raise ValueError("Options.Transitions must be None, 'all' or a list of 1-based "
+                         f"level pairs (u, v); got {transitions!r}.") from None
+    if len(rows) == 0:
+        raise ValueError('Options.Transitions is empty: no transitions selected.')
+    out, seen = [], set()
+    for row in rows:
+        try:
+            uv = list(row)
+        except TypeError:
+            raise ValueError(f'Options.Transitions entries must be level pairs (u, v); got {row!r}.') from None
+        if len(uv) != 2:
+            raise ValueError(f'Options.Transitions entries must be level pairs (u, v); got {row!r}.')
+        idx = []
+        for k in uv:
+            if isinstance(k, (bool, np.bool_)) or not isinstance(k, (int, np.integer, float, np.floating)) \
+                    or not math.isfinite(float(k)) or float(k) != int(k):
+                raise ValueError(f'Options.Transitions level indices must be integers; got {row!r}.')
+            idx.append(int(k))
+        u, v = idx
+        if not (1 <= u <= n_states and 1 <= v <= n_states):
+            raise ValueError(f'Options.Transitions level pair {tuple(row)} is out of range: '
+                             f'levels are numbered 1..{n_states}.')
+        if u == v:
+            raise ValueError(f'Options.Transitions level pair {tuple(row)} has u == v.')
+        p = (min(u, v) - 1, max(u, v) - 1)
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out, False
+
+
 def _projectzones_loop(
     pos: np.ndarray,
     amp: np.ndarray,
@@ -1321,9 +1376,20 @@ def _pepper_single(
     _pt_ok = init_state is None and not freq_sweep
     from dataclasses import replace as _dc_replace_o
     _opt_rf = _dc_replace_o(opt, Threshold=0.0)   # slot-based paths pre-select transitions globally (EasySpin)
-    _pairs_sel = _preselect_pairs(*_ham_ops(), ham_sys, exp, opt,
-                                  float(exp.Field) if freq_sweep else 0.5 * (exp.Range[0] + exp.Range[1]),
-                                  freq_sweep=freq_sweep) if not str(opt.Method).startswith('perturb') else None
+    # Opt.Transitions: user-chosen level pairs replace the automatic pre-selection
+    # in every matrix path; 'all' also switches the intensity post-selection off.
+    _user_tr = getattr(opt, 'Transitions', None)
+    if _user_tr is not None and str(opt.Method).startswith('perturb'):
+        raise ValueError("Options.Transitions cannot be used with perturbation theory "
+                         f"(Options.Method='{opt.Method}'); use Method='matrix' or 'hybrid'.")
+    _user_pairs, _trans_all = _user_transitions(_user_tr, _ham_ops()[0].shape[0]) if _user_tr is not None else (None, False)
+    _post_thr = 0.0 if _trans_all else float(opt.Threshold)
+    if _user_pairs is not None:
+        _pairs_sel = _user_pairs
+    else:
+        _pairs_sel = _preselect_pairs(*_ham_ops(), ham_sys, exp, opt,
+                                      float(exp.Field) if freq_sweep else 0.5 * (exp.Range[0] + exp.Range[1]),
+                                      freq_sweep=freq_sweep) if not str(opt.Method).startswith('perturb') else None
 
     # Opt.separate='transitions': one spectrum row per transition slot (EasySpin
     # nSpectra = nTransitions).  Rows are collected per slot by _acc and, for the
@@ -1381,6 +1447,13 @@ def _pepper_single(
         perturbational-nucleus description, and returns the expanded line list.
         """
         opt_ = kw.pop('opt_override', opt_)
+        if _user_pairs is not None:
+            # Opt.Transitions: the crystal, O3, per-orientation and auto-range
+            # calls search exactly the user's level pairs too
+            if kw.get('pairs') is None:
+                kw['pairs'] = _user_pairs
+            if _trans_all and opt_.Threshold != 0:
+                opt_ = _dc_replace_o(opt_, Threshold=0.0)
         if freq_sweep:
             return resfreqs_batch(*_ham_ops(), phi_b, theta_b, exp_, opt_, ham_sys, **kw)
         if hybrid_info is not None:
@@ -1678,7 +1751,7 @@ def _pepper_single(
                 all_widths[s + j] = widths
                 all_pairs[s + j] = prs
         slot_B, slot_I, slot_W = _transition_slots(all_B_res, all_intens, all_widths, all_pairs, n_orient)
-        slot_B, slot_I, slot_W = _filter_slots(slot_B, slot_I, slot_W, float(opt.Threshold))
+        slot_B, slot_I, slot_W = _filter_slots(slot_B, slot_I, slot_W, _post_thr)
         _any_nan = any(np.isnan(b_).any() for b_ in slot_B)
         if slot_W is None:
             slot_W = [np.zeros(n_orient) for _ in slot_B]
@@ -1846,7 +1919,7 @@ def _pepper_single(
                 slot_B, slot_I, slot_W = _transition_slots(
                     all_B_res, all_intens, all_widths, all_pairs, n_orient
                 )
-                slot_B, slot_I, slot_W = _filter_slots(slot_B, slot_I, slot_W, float(opt.Threshold))
+                slot_B, slot_I, slot_W = _filter_slots(slot_B, slot_I, slot_W, _post_thr)
                 _any_nan = any(np.isnan(b_).any() for b_ in slot_B)
                 for i_t in range(len(slot_B)):
                     B_c = slot_B[i_t]
@@ -1975,7 +2048,7 @@ def _pepper_single(
                 _seg_wts_d = _areas_c
 
                 slot_B_d, slot_I_d, _ = _transition_slots(all_B_d, all_I_d, None, all_P_d, n_orient)
-                slot_B_d, slot_I_d, _ = _filter_slots(slot_B_d, slot_I_d, None, float(opt.Threshold))
+                slot_B_d, slot_I_d, _ = _filter_slots(slot_B_d, slot_I_d, None, _post_thr)
                 for i_t in range(len(slot_B_d)):
                     B_t = slot_B_d[i_t]
                     I_t = slot_I_d[i_t]

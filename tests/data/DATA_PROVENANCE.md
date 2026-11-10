@@ -32,6 +32,7 @@ Tests comparing against these are true cross-validation.
 | `generate_esfit_crossval.m` | `esfit_test*.mat` | Fitting cross-validation |
 | `generate_examples_*.m` | `example_*.mat` | Example simulation outputs |
 | `generate_pepper_cupc_refs.m` | `ref_pepper_cupc.mat` | Cu(II) + ligand nuclei: `matrix`/`perturb`/`hybrid` on the same systems (34 cases), incl. natural-abundance isotopologues, tilted and anisotropic ligand A tensors, quadrupole coupling, enlarged exact core, two components |
+| `generate_pepper_transitions_refs.m` | `ref_pepper_transitions.mat` | `Opt.Transitions` (9 cases): S=3/2 central/outer/`'all'` (powder, HStrain, crystal), S=1 half-field line (`'all'`, `[1 3]`), frequency sweep with one pair |
 
 ### MATLAB-sourced .mat files (by module)
 
@@ -52,6 +53,7 @@ Tests comparing against these are true cross-validation.
 **CW EPR (pepper):**
 `pepper_*.mat` (all 30 files) — MATLAB
 `ref_pepper_cupc.mat` — MATLAB-gen (EasySpin R2024b, 2026-10-07; stores each case's `Sys`/`Exp`/`Opt` so the Python side reconstructs the inputs, plus `matlab_seconds` for the cost comparison)
+`ref_pepper_transitions.mat` — MATLAB-gen (EasySpin R2024b, 2026-11-10; stores each case's `Sys`/`Exp`/`Opt`)
 
 **Solution EPR (garlic):**
 `ref_garlic.mat`, `garlic_*.mat` (all 12 files) — MATLAB-gen / MATLAB

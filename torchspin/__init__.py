@@ -25,7 +25,7 @@ try:
     __version__ = _pkg_version("torchspin")
 except _PkgNotFound:
     # Editable install during development, or version metadata unavailable.
-    __version__ = "0.7.2+dev"
+    __version__ = "0.7.3+dev"
 
 # Idle OpenMP threads must sleep, not spin-wait (see torchspin/_omp.py and
 # docs/pitfalls.md, "Threads and performance"). This has to run before anything

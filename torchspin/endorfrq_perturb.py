@@ -35,6 +35,7 @@ def endorfrq_perturb(
     theta: float = 0.0,
     order: int = 2,
     nuclei: Optional[list[int]] = None,
+    opt=None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """ENDOR transition frequencies via perturbation theory (Iwasaki 1974).
 
@@ -51,6 +52,11 @@ def endorfrq_perturb(
         Perturbation order: 1 or 2 (default 2).
     nuclei:
         List of 0-based nucleus indices to include.  Default: all nuclei.
+    opt:
+        Optional :class:`~torchspin.experiment.Options`.  Only
+        ``opt.Enhancement`` is read: hyperfine enhancement is not available
+        in perturbation theory, so ``Enhancement=True`` raises (EasySpin's
+        ``endorfrq_perturb`` silently ignores it).  Use :func:`endorfrq`.
 
     Returns
     -------
@@ -63,6 +69,8 @@ def endorfrq_perturb(
     ------
     ValueError
         If system has more than one electron or other unsupported features.
+    NotImplementedError
+        If ``opt.Enhancement`` is True.
 
     Notes
     -----
@@ -76,6 +84,11 @@ def endorfrq_perturb(
 
     ENDOR transitions connect states mI and mI+1 within the same mS manifold.
     """
+    if opt is not None and bool(getattr(opt, 'Enhancement', False)):
+        raise NotImplementedError(
+            "endorfrq_perturb: Options.Enhancement=True (hyperfine enhancement) is not "
+            "implemented in perturbation theory; use endorfrq (matrix diagonalization)."
+        )
     from torchspin.spinsystem import _reject_h0extra
     _reject_h0extra(sys, 'endorfrq_perturb (perturbation theory)')
     if sys.nElectrons != 1:

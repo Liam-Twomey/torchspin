@@ -6,6 +6,25 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.7.3] — 2026-11-10
+
+### Added
+
+- **Hyperfine enhancement in ENDOR intensities: `Options.Enhancement`**
+  (EasySpin `Opt.Enhancement`). Default `False`: results are unchanged
+  (bit-identical). With `True`, `endorfrq` (new keyword `opt=Options(...)`)
+  and the matrix paths of `salt` use the total magnetic moment (electron +
+  nuclear, the `mux/muy/muz` of `ham()`) perpendicular to the field,
+  chi-averaged over lab x and y, as the rf transition operator. As in EasySpin
+  `endorfrq.m`, the transition selection (`threshold`/`Opt.Threshold`) still uses
+  the nuclear-only rates and electronic level pairs are excluded. `salt` with
+  `Enhancement=True` always uses the matrix ENDOR path; its automatic
+  first-order perturbation shortcut (one electron, no Q) has no enhancement.
+  `endorfrq_perturb` gained an `opt` keyword and raises `NotImplementedError`
+  for `Enhancement=True` (EasySpin silently ignores it there). Validated
+  against EasySpin `endorfrq`/`salt` with `Opt.Enhancement='on'`
+  (`tests/data/endor_enhancement_refs.mat`), a NumPy brute force, the
+  first-order factor (ν_ENDOR/ν_I)² and gradients (reverse and forward mode).
 ## [0.7.2] — 2026-11-10
 
 ### Added

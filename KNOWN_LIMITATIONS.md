@@ -330,6 +330,35 @@ projection / convolution shared with `pepper_autograd`; gradients vs finite
 differences 1e-6–1e-8 for g, A, Q, lw, `test_salt_autograd.py`); the field-swept
 (multi-field) mode is not and raises for grad tensors.
 
+## ENDOR — hyperfine enhancement (`Options.Enhancement`, 0.7.3)
+
+`Options.Enhancement=True` (default `False`, as in EasySpin) makes the rf operator of
+`endorfrq` and of `salt`'s matrix paths the total moment (electron + nuclear,
+`ham()`'s `mux/muy/muz`) perpendicular to the field, chi-averaged over lab x and y.
+Agreement with EasySpin `endorfrq`/`salt` (`Opt.Enhancement='on'`) is 1e-13 of the
+strongest line per level pair (endorfrq) and cosine > 0.99995 (salt).
+
+- **Selection.** As in EasySpin, `threshold` / `Opt.Threshold` selects on the nuclear-only
+  rates and electronic level pairs are excluded. "Electronic" is decided by EasySpin's
+  rule: energy-sorted levels grouped into blocks of prod(2I+1) and only pairs in the same
+  block kept. This is right when the electron Zeeman (or zero-field) splitting exceeds
+  all nuclear splittings. Near level crossings or at very low field the block assignment,
+  and with it the line list, can be wrong.
+- **Moment operator.** torchspin uses `ham()`'s moments. These also contain orbital
+  Zeeman (`Sys.L`) and linear higher-order Zeeman (`Sys.Ham1xx`) terms. EasySpin uses
+  `ham_ez + ham_nz` only. The two agree for ordinary spin systems. There is no
+  `Opt.Nuclei` subset: all nuclei contribute.
+- **Perturbation theory.** `endorfrq_perturb(..., opt=Options(Enhancement=True))` raises.
+  EasySpin skips enhancement there with a log message. `salt` normally picks first-order
+  perturbation theory by itself for one electron without Q. With `Enhancement=True` it
+  uses the matrix path instead, which is slower (one eigh per orientation).
+- **Intensity scale.** For those one-electron, no-Q systems, the default first-order path
+  uses unit line intensities, while the matrix path uses |⟨i|μ|j⟩|² in (MHz/mT)². So
+  switching `Enhancement` on changes the overall scale by orders of magnitude in addition
+  to the enhancement. Normalize before you compare the two. Systems with Q, or more than
+  one electron, are on the matrix path either way, and their on/off ratio matches
+  EasySpin to 1e-3.
+
 ## Garlic — what is and is not ported
 
 Line positions use EasySpin's algorithm exactly (per-nuclear-group

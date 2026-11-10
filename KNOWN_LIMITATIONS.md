@@ -146,6 +146,27 @@ on a finer grid and reports what changed — the only trustworthy test, and the
 one used to produce the table above.  The two `cupc_grid19_4N_*` cases are kept in the validation suite as
 the record of this.
 
+## Higher-order Zeeman terms (`Sys.Ham*`): deliberate deviation from EasySpin (0.6.7)
+
+`ham(Sys)` returns `(H0, mux, muy, muz)` with H(B) = H0 − μ·B. The simulators that
+work from this decomposition (pepper's resonance search, `levels`, `endorfrq`, `salt`,
+`curry`, `nucfrq2d`) rely on it agreeing with `ham(Sys, B0)`.
+
+- **Linear terms (`Ham1xx`).** EasySpin's `ham.m` adds the linear-in-B part dH/dB to the
+  moment operators instead of subtracting it. Its own H0 − μ·B therefore has the opposite
+  sign of these terms to its `ham(Sys, B0)`; the EasySpin reference data show this to
+  machine precision. torchspin up to 0.6.6 copied this. Since 0.6.7 the term enters as
+  −dH/dB, so H0 − μ·B equals `ham(Sys, B0)`. torchspin's `mux/muy/muz` differ from
+  EasySpin's for these systems by design; H0 and `ham(Sys, B0)` still match EasySpin.
+- **Effect on results.** Without nuclei, flipping the sign of the entire linear term
+  leaves the energies and transition probabilities unchanged (time reversal), so
+  field-swept EPR spectra were not affected. With nuclei, the term had the wrong sign
+  relative to the nuclear Zeeman interaction, which changes ENDOR and nuclear frequencies
+  and the intensities of forbidden transitions.
+- **Quadratic and cubic terms (`Ham2xx`, `Ham3xx`)** cannot be written as H0 − μ·B. As in
+  EasySpin, they enter only `ham(Sys, B0)`. Simulators that use the decomposition ignore
+  them.
+
 ## Pepper — absolute intensity (fixed 2026-09-01)
 
 Until 2026-09-01 `pepper()` multiplied the spectrum by one of four empirical

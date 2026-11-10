@@ -295,7 +295,7 @@ class SpinSystem:
                 # Scalar: isotropic g for all electrons
                 self.g = self.g.expand(n_e, 3).clone()
             elif self.g.ndim == 1:
-                if n_e > 1 and self.g.shape[0] == n_e:
+                if self.g.shape[0] == n_e:
                     # [g1, g2, ...]: one isotropic g per electron (EasySpin column form)
                     self.g = self.g.unsqueeze(1).expand(n_e, 3).clone()
                 elif self.g.shape[0] == 3:

@@ -219,3 +219,30 @@ class TestHamEzhoTensor:
         G0, G1, G2, G3 = ham_ezho(sys)
         assert torch.allclose(G0, torch.zeros_like(G0))
         assert all(torch.allclose(g, torch.zeros_like(g)) for g in G1)
+
+
+def test_linear_ham_terms_same_sign_with_and_without_field():
+    """ham(sys, B0) == H0 - mu.B when Sys.Ham has linear-in-B terms (B11).
+
+    The moment operators used to carry +dH/dB, so the linear Sys.Ham terms entered
+    the field-free decomposition (used by pepper, levels, salt, ...) with the
+    opposite sign to ham(sys, B0) and to the nuclear Zeeman term.
+    """
+    from torchspin.ham import ham
+    B = [100.0, 200.0, 340.0]
+    for Ham in ({'110': [1.0]}, {'112': [[1.0, 0.5, 0.0, 0.2, 0.1]]}, {'110': [0.4], '112': [[0.3, 0.1, 0.2, 0.0, 0.5]]}):
+        for nuc in ({}, dict(Nucs='1H', A=[5.0, 6.0, 9.0])):
+            s = SpinSystem(S=[1.0], Ham=Ham, **nuc)
+            H0, mx, my, mz = ham(s)
+            Hd = H0 - (mx * B[0] + my * B[1] + mz * B[2])
+            assert torch.allclose(ham(s, B0=B), Hd, atol=1e-9 * float(Hd.abs().max())), (Ham, nuc)
+
+
+def test_isotropic_g_given_as_one_element_list():
+    """g=[2.0] means isotropic g = 2 (as g=2.0 does), not an IndexError."""
+    from torchspin.ham import ham
+    for S in ([0.5], [1.0]):
+        a, b = SpinSystem(S=S, g=[2.0]), SpinSystem(S=S, g=2.0)
+        assert torch.equal(a.g, b.g)
+        assert torch.allclose(ham(a, B0=[0, 0, 340]), ham(b, B0=[0, 0, 340]))
+

@@ -11,7 +11,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 CPU-parallel fitting and data generation. Default behavior (`n_workers=1`,
 `simulate_batch(workers=0)`) is unchanged; no physics code changed.
 
-### Changed — behavior differs from 0.6.6
+### Changed — behavior differs from 0.6.7
 
 - **`FitOptions.n_workers` now also applies to levmar, trf, lbfgsb and the
   uncertainty estimate of every method**, not only to the population methods.
@@ -79,6 +79,26 @@ CPU-parallel fitting and data generation. Default behavior (`n_workers=1`,
 
 - `benchmarks/cluster/slurm_cpu.sh` and `slurm_gpu.sh`, replaced by the
   array template. The CPU script's thread sweep was mislabeled (see Fixed).
+
+## [0.6.7] — 2026-11-09
+
+### Fixed
+
+- **Linear higher-order Zeeman terms (`Sys.Ham1xx`) had opposite signs in
+  `ham(Sys)` and `ham(Sys, B0)`** (all public releases, 0.3.0–0.6.6). The moment operators of `ham(Sys)` carried
+  +dH/dB, but torchspin's convention is H = H0 − μ·B, so the field-free
+  decomposition (used by pepper's resonance search, `levels`, `endorfrq`,
+  `salt`, `curry`, `nucfrq2d`) had these terms with the opposite sign to
+  `ham(Sys, B0)` and to the nuclear Zeeman interaction. Without nuclei this
+  does not change spectra (time reversal); with nuclei it changed ENDOR and
+  nuclear frequencies and forbidden-transition intensities. EasySpin's
+  `ham.m` has the same inconsistency; torchspin now deliberately deviates
+  from it (see KNOWN_LIMITATIONS.md, "Higher-order Zeeman terms").
+- `hamsymm` added the higher-order Zeeman Hamiltonian twice when probing for
+  symmetry (`ham(Sys, B0)` already includes it).
+- `SpinSystem(g=[2.0])` (a one-element list, which EasySpin treats like
+  `g=2`) crashed `ham` with an IndexError; it now means isotropic g, like a
+  scalar.
 
 ## [0.6.6] — 2026-11-09
 

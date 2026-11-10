@@ -275,11 +275,9 @@ def _hamsymm_eigs(
     FieldVecs = _probe_field_vectors()
 
     if higher_zeeman:
-        from torchspin.ham_ezho import ham_ezho
-
         def eig_at(Bvec: torch.Tensor) -> torch.Tensor:
             B = Bvec.tolist()
-            H = ham(sys, B0=B) + ham_ezho(sys, B0=B)
+            H = ham(sys, B0=B)          # already includes ham_ezho(sys, B0=B)
             return torch.linalg.eigvalsh(H)
     else:
         H0, mux, muy, muz = ham(sys)

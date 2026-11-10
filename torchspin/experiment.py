@@ -208,7 +208,8 @@ class Options:
 
         :func:`salt` ignores ``Method``: it always finds resonance fields by
         diagonalization and the ENDOR frequencies by first-order perturbation
-        theory.
+        theory for one electron without quadrupole couplings, and by matrix
+        diagonalization otherwise or when ``Enhancement=True``.
     HybridCoreNuclei:
         ``Method='hybrid'`` only.  1-based indices into ``Sys.Nucs`` of the
         nuclei to keep in the exactly diagonalized core; all electron spins are
@@ -270,6 +271,18 @@ class Options:
         = automatic: all orientations at once, capped so that the batched
         Hamiltonians (orientations × field knots × dim²) stay below ~400 MB.
         Set to 1 for sequential processing (debugging/low-memory systems).
+    Enhancement:
+        :func:`~torchspin.endorfrq.endorfrq` and :func:`~torchspin.salt.salt`
+        only (EasySpin ``Opt.Enhancement``).  ``False`` (default, as in
+        EasySpin): the rf transition operator is the nuclear magnetic moment
+        only.  ``True``: it is the total magnetic moment (electron + nuclear,
+        the moment operators of :func:`~torchspin.ham.ham`), projected on the
+        same rf directions, which includes hyperfine enhancement.  Transition
+        selection (``Threshold``) still uses the nuclear-only rates, and
+        electronic (EPR) level pairs are excluded, as in EasySpin.  ``salt``
+        then always uses the matrix ENDOR path (its automatic first-order
+        perturbation shortcut has no enhancement); ``endorfrq_perturb``
+        raises.
     """
 
     Method: str = 'matrix'
@@ -289,6 +302,7 @@ class Options:
     Stretch: float = 0.25             # automatic sweep range padding factor (EasySpin garlic Opt.Stretch)
     ModellingAccuracy: float = 2e-6   # resonance search: segment-model accuracy relative to mwFreq (EasySpin Opt.ModellingAccuracy)
     device: str = 'cpu'
+    Enhancement: bool = False         # ENDOR hyperfine enhancement (EasySpin Opt.Enhancement), endorfrq/salt matrix paths
 
     @property
     def grid_size_coarse(self) -> int:

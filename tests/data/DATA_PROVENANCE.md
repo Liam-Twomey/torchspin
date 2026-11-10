@@ -33,6 +33,7 @@ Tests comparing against these are true cross-validation.
 | `generate_examples_*.m` | `example_*.mat` | Example simulation outputs |
 | `generate_endor_enhancement_refs.m` | `endor_enhancement_refs.mat` | ENDOR hyperfine enhancement (`Opt.Enhancement` off/on): endorfrq per level pair for 1H, 14N+1H, 63Cu+14N at 4 orientations; fixed-field salt for 14N (Q), 1H, 14N+1H |
 | `generate_pepper_cupc_refs.m` | `ref_pepper_cupc.mat` | Cu(II) + ligand nuclei: `matrix`/`perturb`/`hybrid` on the same systems (34 cases), incl. natural-abundance isotopologues, tilted and anisotropic ligand A tensors, quadrupole coupling, enlarged exact core, two components |
+| `generate_pepper_quadzeeman_refs.m` | `ref_pepper_quadzeeman.mat` | Field-quadratic `Sys.Ham220`/`Ham222` terms in pepper (S=1 with lwpp and with HStrain, S=3/2), EasySpin field sweeps; `Options.QuadraticZeeman` (0.7.1) |
 
 ### MATLAB-sourced .mat files (by module)
 

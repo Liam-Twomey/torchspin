@@ -283,6 +283,18 @@ class Options:
         then always uses the matrix ENDOR path (its automatic first-order
         perturbation shortcut has no enhancement); ``endorfrq_perturb``
         raises.
+    QuadraticZeeman:
+        Include the field-quadratic and field-cubic higher-order Zeeman terms of
+        ``Sys.Ham`` (orders lB = 2 and 3) in the resonance search, so that
+        H(B) = H0 − B n·μ + B² n·G2·n + B³ G3[n,n,n] equals ``ham(Sys, B·n)``.
+        Default ``False``: these terms are dropped, as before (H = H0 − B n·μ).
+        Supported by :func:`pepper` and :func:`pepper_autograd` with
+        ``Method='matrix'`` (field and frequency sweeps, powders and crystals)
+        and by :func:`resfreqs_matrix`; the perturbation and hybrid methods,
+        :func:`resfields`, :func:`garlic` and :func:`salt` raise
+        ``NotImplementedError`` when the option is on and such terms are present.
+        Transition moments stay those of the linear moment operators μ, as in
+        EasySpin; the field-to-frequency factor dB/dE uses the full slope.
     """
 
     Method: str = 'matrix'
@@ -302,6 +314,7 @@ class Options:
     Stretch: float = 0.25             # automatic sweep range padding factor (EasySpin garlic Opt.Stretch)
     ModellingAccuracy: float = 2e-6   # resonance search: segment-model accuracy relative to mwFreq (EasySpin Opt.ModellingAccuracy)
     device: str = 'cpu'
+    QuadraticZeeman: bool = False     # include lB = 2, 3 Sys.Ham terms in the resonance search (default: dropped)
     Enhancement: bool = False         # ENDOR hyperfine enhancement (EasySpin Opt.Enhancement), endorfrq/salt matrix paths
 
     @property

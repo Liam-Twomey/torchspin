@@ -165,7 +165,43 @@ work from this decomposition (pepper's resonance search, `levels`, `endorfrq`, `
   and the intensities of forbidden transitions.
 - **Quadratic and cubic terms (`Ham2xx`, `Ham3xx`)** cannot be written as H0 − μ·B. As in
   EasySpin, they enter only `ham(Sys, B0)`. Simulators that use the decomposition ignore
-  them.
+  them unless `Options.QuadraticZeeman=True` (0.7.1, next section).
+
+## Simulator — field-quadratic Zeeman terms, `Options.QuadraticZeeman` (0.7.1)
+
+By default (`QuadraticZeeman=False`) the simulators use H = H0 − B n·μ and drop
+the `Sys.Ham` terms of order lB = 2 and 3, as described above. With
+`Options.QuadraticZeeman=True` (or `levels(..., quadratic_zeeman=True)`) these
+terms are included as H(B) = H0 − B n·μ + B² n·G2·n + B³ G3[n,n,n], which equals
+`ham(Sys, B·n)`.
+
+- **Supported:** `pepper` and `pepper_autograd` with `Method='matrix'` (powder
+  grids including O3, crystals, field and frequency sweeps, strains), `levels`,
+  `resfreqs_matrix`, and `resfields_batch`/`resfreqs_batch` (keyword
+  `zeeman_ho=`).
+- **Raise `NotImplementedError`** when the option is on and a nonzero lB ≥ 2 term
+  is present: `Method='perturb*'` (also where pepper would otherwise fall back to
+  the matrix solver), `Method='hybrid'`, `resfields` (single orientation),
+  `resfields_perturb(_batch)`, `garlic`, `salt`; `pepper_autograd` with
+  `'perturb*'`. Terms of order lB ≥ 4 raise in every path.
+- **Not covered by the option:** `resfields_eig` (configured by `EigOptions`),
+  `endorfrq`, `curry`, `nucfrq2d` and `levelsplot` still drop lB ≥ 2 terms.
+- **Transition moments** are those of the linear moment operators μ, as in
+  EasySpin. The B1-linear part of the quadratic term, 2 (B0·G2·B1), is not
+  included in the transition operator; its relative size is about 2|n·G2·n|B/(gμB).
+- **dB/dE:** torchspin uses the full slope ⟨v|dH/dB|v⟩ − ⟨u|dH/dB|u⟩. EasySpin's
+  `resfields` builds its level model from the full `ham(Sys, B)` but takes dB/dE
+  from the linear moment only. Line intensities therefore differ by the ratio of the
+  two slopes (0.03–0.3 % for the reference cases).
+- **EasySpin frequency sweeps** with `Sys.Ham2xx` fail: `resfreqs_matrix.m` looks
+  for fields named `ZB*` to detect higher-order terms and then calls `ham` with
+  four outputs, which errors. torchspin's frequency-sweep path is therefore
+  checked against the full Hamiltonian instead of EasySpin.
+- `Sys.Ham` coefficients are constants (`ham_ezho` detaches them): gradients
+  flow to g, D, A, … but not to the Ham terms themselves.
+- In the McGavin–Tennant–Weil formalism the field enters as a rank-lB spherical
+  tensor, so a pure B²·identity term cannot be written (`Ham200` is ignored by
+  `ham_ezho`, as in EasySpin). This does not change transition energies.
 
 ## Pepper — absolute intensity (fixed 2026-09-01)
 

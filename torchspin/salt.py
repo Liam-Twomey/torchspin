@@ -292,6 +292,9 @@ def salt(
     # automatic first-order perturbation shortcut below.
     enhancement = bool(getattr(opt, 'Enhancement', False))
 
+    from torchspin.ham_ezho import check_quadratic_zeeman_unsupported
+    check_quadratic_zeeman_unsupported(sys, opt, 'salt')
+
     # ── Frequency axis ─────────────────────────────────────────────────────
     if freq_range is None:
         f_lo, f_hi = 0.0, 2.0 * exp.mwFreq * 1e3  # MHz

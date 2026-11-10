@@ -591,19 +591,27 @@ def _finish_field_sweep(spec: torch.Tensor, x: torch.Tensor, dx: float, exp,
     return out[0] if spec.ndim == 1 else torch.stack(out)
 
 
-def _preselect_pairs(H0, mux, muy, muz, sys, exp, opt, B_center, freq_sweep=False, zeeman_ho=None):
+def _preselect_pairs(H0, mux, muy, muz, sys, exp, opt, B_center, freq_sweep=False, zeeman_ho=None,
+                     zero_field=False):
     """EasySpin resfields transition pre-selection: transition rates of all level
     pairs at the center field on a small D2h grid (TPSGridSize 4); keep the pairs
     whose maximum rate reaches Opt.Threshold × the largest; pure nuclear
     transitions are dropped when the hyperfine interaction is weak
     (HFIStrength = max|A|·(I+1/2)/ν < 0.5).  Returns a list of (u, v) pairs.
     With ``zeeman_ho`` (Options.QuadraticZeeman) the eigenvectors are those of the
-    full H(B_center) including B² n·G2·n + B³ G3[n,n,n]."""
+    full H(B_center) including B² n·G2·n + B³ G3[n,n,n].
+
+    ``zero_field`` (B_center = 0, Options.ZeroField): the rates are summed over
+    degenerate level clusters before the maximum and the threshold, and the
+    pairs returned are the cluster labels of :func:`resfreqs_batch`
+    (first level of each cluster)."""
     from torchspin.excitation import excitation_geometry, exp_mw_mode
     thr = float(opt.Threshold)
     n = H0.shape[0]
     if thr <= 0:
         return None
+    if zero_field:
+        return _preselect_pairs_zero_field(H0, mux, muy, muz, sys, exp, thr)
     phi_t, theta_t, _, _ = sphgrid('D2h', 4)
     geom = excitation_geometry(exp_mw_mode(exp))
     Ex, Ey, Ez = -mux, -muy, -muz
@@ -647,6 +655,111 @@ def _preselect_pairs(H0, mux, muy, muz, sys, exp, opt, B_center, freq_sweep=Fals
     sel = keep & (max_rate > cutoff)
     ii, jj = torch.nonzero(sel, as_tuple=True)
     return [(int(a), int(b)) for a, b in zip(ii.tolist(), jj.tolist())]
+
+
+def _user_transitions(transitions, n_states):
+    """Resolve ``Options.Transitions`` (EasySpin ``Opt.Transitions``).
+
+    ``None`` → ``(None, False)`` (automatic pre-selection).  ``'all'`` → every
+    level pair ``u < v`` and ``True`` (no intensity post-selection, as EasySpin
+    sets its post-selection threshold to zero).  A list of 1-based level pairs
+    ``(u, v)`` (levels ordered by energy at the resonance field) is validated
+    (``1 <= u, v <= n_states``, ``u != v``), normalized to ``u < v``, stripped of
+    duplicates (first occurrence kept, order otherwise unchanged) and returned
+    0-based with ``False`` (Opt.Threshold post-selection still applies)."""
+    if transitions is None:
+        return None, False
+    if isinstance(transitions, str):
+        if transitions.strip().lower() != 'all':
+            raise ValueError("Options.Transitions must be None, 'all' or a list of 1-based "
+                             f"level pairs (u, v); got {transitions!r}.")
+        return [(i, j) for i in range(n_states) for j in range(i + 1, n_states)], True
+    if isinstance(transitions, torch.Tensor):
+        transitions = transitions.detach().cpu().numpy()
+    if isinstance(transitions, np.ndarray):
+        transitions = transitions.tolist()
+    try:
+        rows = list(transitions)
+    except TypeError:
+        raise ValueError("Options.Transitions must be None, 'all' or a list of 1-based "
+                         f"level pairs (u, v); got {transitions!r}.") from None
+    if len(rows) == 0:
+        raise ValueError('Options.Transitions is empty: no transitions selected.')
+    out, seen = [], set()
+    for row in rows:
+        try:
+            uv = list(row)
+        except TypeError:
+            raise ValueError(f'Options.Transitions entries must be level pairs (u, v); got {row!r}.') from None
+        if len(uv) != 2:
+            raise ValueError(f'Options.Transitions entries must be level pairs (u, v); got {row!r}.')
+        idx = []
+        for k in uv:
+            if isinstance(k, (bool, np.bool_)) or not isinstance(k, (int, np.integer, float, np.floating)) \
+                    or not math.isfinite(float(k)) or float(k) != int(k):
+                raise ValueError(f'Options.Transitions level indices must be integers; got {row!r}.')
+            idx.append(int(k))
+        u, v = idx
+        if not (1 <= u <= n_states and 1 <= v <= n_states):
+            raise ValueError(f'Options.Transitions level pair {tuple(row)} is out of range: '
+                             f'levels are numbered 1..{n_states}.')
+        if u == v:
+            raise ValueError(f'Options.Transitions level pair {tuple(row)} has u == v.')
+        p = (min(u, v) - 1, max(u, v) - 1)
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out, False
+
+
+def _zf_const_pos(B_f, B_c):
+    """Zero field: a transition has the same position at every orientation.
+    Restore that exactly after interpolation, whose round-off would otherwise
+    give near-zero-width triangles that straddle a bin edge, where the
+    projection formulas cancel catastrophically (a few % of the line area)."""
+    fin = B_c[np.isfinite(B_c)]
+    if fin.size == 0:
+        return B_f
+    return np.where(np.isnan(B_f), np.nan, fin[0])
+
+
+def _preselect_pairs_zero_field(H0, mux, muy, muz, sys, exp, thr):
+    """Zero-field variant of :func:`_preselect_pairs`: H = H0 at every
+    orientation, rates summed over pairs of degenerate level clusters
+    (basis invariant), maximum over the D2h N=4 grid, threshold on the cluster
+    pairs; returns their (first level, first level) labels."""
+    from torchspin.excitation import excitation_geometry, exp_mw_mode
+    from torchspin._zerofield import level_clusters
+    phi_t, theta_t, _, _ = sphgrid('D2h', 4)
+    geom = excitation_geometry(exp_mw_mode(exp))
+    Ex, Ey, Ez = -mux, -muy, -muz
+    dev = H0.device
+    E0, V = torch.linalg.eigh(H0)
+    labels, first, onehot = level_clusters(E0)
+    oh = onehot.to(dev)
+    K = first.numel()
+    max_rate = torch.zeros(K, K, dtype=torch.float64, device=dev)
+    for ph, th in zip(phi_t.tolist(), theta_t.tolist()):
+        st, ct, sp, cp = math.sin(th), math.cos(th), math.sin(ph), math.cos(ph)
+        Exy = cp * Ex + sp * Ey
+        if geom.parallel:
+            EzL = st * Exy + ct * Ez
+            rate = (V.conj().T @ EzL @ V).abs() ** 2
+        else:
+            EyL = -sp * Ex + cp * Ey
+            ExL = ct * Exy - st * Ez
+            rate = ((V.conj().T @ ExL @ V).abs() ** 2 + (V.conj().T @ EyL @ V).abs() ** 2) / 2
+        rate_c = oh.T @ rate.real.to(torch.float64).detach() @ oh            # summed over cluster pairs
+        max_rate = torch.maximum(max_rate, rate_c)
+    keep = torch.triu(torch.ones(K, K, dtype=torch.bool, device=dev), diagonal=1)
+    # No exclusion of 'pure nuclear' transitions: at zero field the levels are
+    # not ordered by electron manifold (e.g. the F = 0 <-> F = 1 hyperfine line
+    # of S = 1/2, I = 1/2 would be dropped by the high-field heuristic).
+    rates = max_rate[keep]
+    cutoff = thr * float(rates.max()) if rates.numel() else 0.0
+    sel = keep & (max_rate > cutoff)
+    ii, jj = torch.nonzero(sel, as_tuple=True)
+    return [(int(first[a]), int(first[b])) for a, b in zip(ii.tolist(), jj.tolist())]
 
 
 def _projectzones_loop(
@@ -1101,6 +1214,8 @@ def pepper(sys_or_list, exp: Experiment, opt: Optional[Options] = None):
     * MATLAB-validated to cosine similarity > 0.999 on standard test cases.
     """
     opt_ = opt if opt is not None else Options()
+    from torchspin.experiment import require_positive_field
+    require_positive_field(exp, opt_)    # Field = 0 only with Options.ZeroField
     # Components × isotopologues (EasySpin compisoloop): every component is
     # expanded into its isotopologues (natural abundance or Sys.Abund), each
     # simulated separately and summed with weight Sys.weight·abundance.  With
@@ -1199,6 +1314,9 @@ def _pepper_single(
     # (EasySpin pepper.m): the x axis is the frequency range in GHz and the
     # resonances come from resfreqs_batch instead of resfields_batch.
     freq_sweep = bool(exp.is_freq_swept) or (exp.Field is not None and exp.mwFreq is None)
+    from torchspin.experiment import require_positive_field
+    # Exp.Field = 0 (Options.ZeroField): degenerate levels are summed in clusters
+    zero_field = require_positive_field(exp, opt) and freq_sweep
     from dataclasses import replace as _dc_replace_f
     if not freq_sweep and exp.Range is None:
         # EasySpin pepper.m: automatic field range for S=1/2 from the g and A extremes
@@ -1268,6 +1386,15 @@ def _pepper_single(
     user_ori = _user_orientations(exp)
     if user_ori is not None:
         _check_user_orientations(exp, opt)
+    if zero_field:
+        if getattr(sys, 'initState', None) is not None:
+            raise ValueError('Options.ZeroField cannot be combined with non-equilibrium populations (Sys.initState).')
+        if grid_sym == 'O3':
+            # the one-orientation O3 shortcut is not used at zero field: the
+            # B1 average is taken over a real powder grid
+            grid_sym, R_sym2mol = 'D2h', torch.eye(3, dtype=torch.float64)
+            if opt.Verbosity >= 1:
+                print("pepper: zero field, O3 grid replaced by D2h")
 
     # -----------------------------------------------------------------------
     # Step 1: Build field-independent Hamiltonian and moment operators
@@ -1311,6 +1438,10 @@ def _pepper_single(
                 f"nuclei: list its copies separately in Nucs, or leave it perturbational."
             )
         if _perturb_idx:
+            if getattr(sys, 'H0Extra', None) is not None:
+                raise ValueError("Options.Method='hybrid' removes the perturbational nuclei "
+                                 "from the Hamiltonian, so it cannot include SpinSystem.H0Extra "
+                                 "(an operator on the full spin space); use Method='matrix'.")
             ham_sys = nucspinrmv(sys, _perturb_idx)
             hybrid_info = {
                 'full_sys': sys,
@@ -1382,9 +1513,23 @@ def _pepper_single(
     _pt_ok = init_state is None and not freq_sweep
     from dataclasses import replace as _dc_replace_o
     _opt_rf = _dc_replace_o(opt, Threshold=0.0)   # slot-based paths pre-select transitions globally (EasySpin)
-    _pairs_sel = _preselect_pairs(*_ham_ops(), ham_sys, exp, opt,
-                                  float(exp.Field) if freq_sweep else 0.5 * (exp.Range[0] + exp.Range[1]),
-                                  freq_sweep=freq_sweep, zeeman_ho=_zho) if not str(opt.Method).startswith('perturb') else None
+    # Opt.Transitions: user-chosen level pairs replace the automatic pre-selection
+    # in every matrix path; 'all' also switches the intensity post-selection off.
+    _user_tr = getattr(opt, 'Transitions', None)
+    if _user_tr is not None and str(opt.Method).startswith('perturb'):
+        raise ValueError("Options.Transitions cannot be used with perturbation theory "
+                         f"(Options.Method='{opt.Method}'); use Method='matrix' or 'hybrid'.")
+    _user_pairs, _trans_all = _user_transitions(_user_tr, _ham_ops()[0].shape[0]) if _user_tr is not None else (None, False)
+    _post_thr = 0.0 if _trans_all else float(opt.Threshold)
+    if _user_pairs is not None:
+        _pairs_sel = _user_pairs
+    elif zero_field:
+        _pairs_sel = _preselect_pairs(*_ham_ops(), ham_sys, exp, opt, 0.0, freq_sweep=True,
+                                      zero_field=True) if not str(opt.Method).startswith('perturb') else None
+    else:
+        _pairs_sel = _preselect_pairs(*_ham_ops(), ham_sys, exp, opt,
+                                      float(exp.Field) if freq_sweep else 0.5 * (exp.Range[0] + exp.Range[1]),
+                                      freq_sweep=freq_sweep, zeeman_ho=_zho) if not str(opt.Method).startswith('perturb') else None
 
     # Opt.separate='transitions': one spectrum row per transition slot (EasySpin
     # nSpectra = nTransitions).  Rows are collected per slot by _acc and, for the
@@ -1442,9 +1587,18 @@ def _pepper_single(
         perturbational-nucleus description, and returns the expanded line list.
         """
         opt_ = kw.pop('opt_override', opt_)
+        if _user_pairs is not None:
+            # Opt.Transitions: the crystal, O3, per-orientation and auto-range
+            # calls search exactly the user's level pairs too
+            if kw.get('pairs') is None:
+                kw['pairs'] = _user_pairs
+            if _trans_all and opt_.Threshold != 0:
+                opt_ = _dc_replace_o(opt_, Threshold=0.0)
         if _zho is not None:
             kw['zeeman_ho'] = _zho
         if freq_sweep:
+            if zero_field:
+                kw['zero_field'] = True
             return resfreqs_batch(*_ham_ops(), phi_b, theta_b, exp_, opt_, ham_sys, **kw)
         if hybrid_info is not None:
             kw['hybrid'] = hybrid_info
@@ -1811,7 +1965,7 @@ def _pepper_single(
                 all_widths[s + j] = widths
                 all_pairs[s + j] = prs
         slot_B, slot_I, slot_W = _transition_slots(all_B_res, all_intens, all_widths, all_pairs, n_orient)
-        slot_B, slot_I, slot_W = _filter_slots(slot_B, slot_I, slot_W, float(opt.Threshold))
+        slot_B, slot_I, slot_W = _filter_slots(slot_B, slot_I, slot_W, _post_thr)
         _any_nan = any(np.isnan(b_).any() for b_ in slot_B)
         if slot_W is None:
             slot_W = [np.zeros(n_orient) for _ in slot_B]
@@ -1838,6 +1992,8 @@ def _pepper_single(
                 B_f = _interp_slot(B_c, grid_sym, N_coarse, nfKnots, vecs_sym_c, vecs_sym_f_s, any_nan=_any_nan)
                 if B_f is None:
                     continue
+                if zero_field:
+                    B_f = _zf_const_pos(B_f, B_c)
                 I_f = _interp_slot(I_c, grid_sym, N_coarse, nfKnots, vecs_sym_c, vecs_sym_f_s, mode='val')
                 W_f = _interp_slot(W_c, grid_sym, N_coarse, nfKnots, vecs_sym_c, vecs_sym_f_s, mode='val')
             else:
@@ -1979,7 +2135,7 @@ def _pepper_single(
                 slot_B, slot_I, slot_W = _transition_slots(
                     all_B_res, all_intens, all_widths, all_pairs, n_orient
                 )
-                slot_B, slot_I, slot_W = _filter_slots(slot_B, slot_I, slot_W, float(opt.Threshold))
+                slot_B, slot_I, slot_W = _filter_slots(slot_B, slot_I, slot_W, _post_thr)
                 _any_nan = any(np.isnan(b_).any() for b_ in slot_B)
                 for i_t in range(len(slot_B)):
                     B_c = slot_B[i_t]
@@ -1988,6 +2144,8 @@ def _pepper_single(
                     B_f = _interp_slot(B_c, grid_sym, N_coarse, nfKnots, vecs_sym_c, vecs_sym_f, any_nan=_any_nan)
                     if B_f is None:
                         continue
+                    if zero_field:
+                        B_f = _zf_const_pos(B_f, B_c)
                     I_f = _interp_slot(I_c, grid_sym, N_coarse, nfKnots, vecs_sym_c, vecs_sym_f, mode='val')
 
                     if use_proj:
@@ -2108,7 +2266,7 @@ def _pepper_single(
                 _seg_wts_d = _areas_c
 
                 slot_B_d, slot_I_d, _ = _transition_slots(all_B_d, all_I_d, None, all_P_d, n_orient)
-                slot_B_d, slot_I_d, _ = _filter_slots(slot_B_d, slot_I_d, None, float(opt.Threshold))
+                slot_B_d, slot_I_d, _ = _filter_slots(slot_B_d, slot_I_d, None, _post_thr)
                 for i_t in range(len(slot_B_d)):
                     B_t = slot_B_d[i_t]
                     I_t = slot_I_d[i_t]

@@ -125,6 +125,8 @@ def cardamom(
     t:
         Time axis for FID, shape ``(nSteps,)``.
     """
+    from torchspin.spinsystem import _reject_h0extra
+    _reject_h0extra(sys, 'cardamom')
     if opt is None:
         opt = CardamomOptions()
 

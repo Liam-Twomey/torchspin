@@ -5,7 +5,7 @@ Mirrors EasySpin's ``Exp`` and ``Opt`` structs for CW EPR powder simulation.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 
 
 @dataclass
@@ -69,6 +69,11 @@ class Experiment:
           triplets, S=1 systems).
     Field:
         Fixed static field in mT (frequency-swept mode).  ``None`` = field-swept.
+        Must be positive; ``Field = 0`` (zero-field frequency sweeps and
+        fixed-field ENDOR) is accepted by :func:`pepper` and :func:`salt` only
+        with ``Options(ZeroField=True)``.  Every other simulator, and pepper/salt
+        without that option, raise the usual "must be positive" error when they
+        are called.
     mwRange:
         Microwave frequency sweep range ``[nu_lo, nu_hi]`` in GHz
         (frequency-swept mode).  ``None`` = field-swept.
@@ -166,11 +171,13 @@ class Experiment:
                 raise ValueError("Experiment.mwRange must be [nu_lo, nu_hi] in GHz.")
             if self.mwRange[0] >= self.mwRange[1]:
                 raise ValueError("Experiment.mwRange[1] must be larger than mwRange[0].")
-            if self.Field <= 0:
+            # Field = 0 is held back until a simulator sees the Options
+            # (Options.ZeroField, see require_positive_field).
+            if self.Field < 0:
                 raise ValueError("Experiment.Field must be positive (mT).")
         elif self.is_fixed_field:
             # Fixed-field mode validation (ENDOR)
-            if self.Field <= 0:
+            if self.Field < 0:
                 raise ValueError("Experiment.Field must be positive (mT).")
         else:
             # Field-swept mode validation.  Range may be omitted (automatic sweep
@@ -229,6 +236,26 @@ class Experiment:
             self.OrientationWeights = w
 
 
+def require_positive_field(exp, opt=None) -> bool:
+    """Reject ``Experiment.Field = 0`` unless ``opt.ZeroField`` allows it.
+
+    :class:`Experiment` cannot see the Options, so it accepts ``Field = 0`` in
+    frequency-swept and fixed-field mode and every simulator that reads
+    ``exp.Field`` calls this first: without ``Options(ZeroField=True)`` it raises
+    the same ``ValueError`` that Experiment raises for a negative field.  Returns
+    True when the experiment is a permitted zero-field one.
+    """
+    if exp is None or getattr(exp, 'Field', None) is None:
+        return False
+    if not (exp.is_freq_swept or exp.is_fixed_field):
+        return False
+    if float(exp.Field) > 0:
+        return False
+    if float(exp.Field) == 0 and bool(getattr(opt, 'ZeroField', False)):
+        return True
+    raise ValueError("Experiment.Field must be positive (mT).")
+
+
 VALID_METHODS = frozenset({
     'matrix', 'exact', 'hybrid', 'perturb',
     'perturb1', 'perturb2', 'perturb3', 'perturb4', 'perturb5',
@@ -269,7 +296,8 @@ class Options:
 
         :func:`salt` ignores ``Method``: it always finds resonance fields by
         diagonalization and the ENDOR frequencies by first-order perturbation
-        theory.
+        theory for one electron without quadrupole couplings, and by matrix
+        diagonalization otherwise or when ``Enhancement=True``.
     HybridCoreNuclei:
         ``Method='hybrid'`` only.  1-based indices into ``Sys.Nucs`` of the
         nuclei to keep in the exactly diagonalized core; all electron spins are
@@ -324,6 +352,18 @@ class Options:
     Threshold:
         Relative intensity cutoff for transitions.  Transitions with
         intensity below ``Threshold * max_intensity`` are discarded.
+    Transitions:
+        :func:`pepper` / :func:`~torchspin.pepper_autograd.pepper_autograd`
+        only (EasySpin ``Opt.Transitions``).  ``None`` (default): automatic
+        transition pre-selection with ``Threshold``.  ``'all'``: every level
+        pair ``u < v``, with neither pre-selection nor the ``Threshold``
+        intensity post-selection.  A list of 1-based level pairs ``(u, v)``
+        (levels numbered by ascending energy at the resonance field, as in
+        EasySpin): exactly those transitions; pairs are normalized to ``u < v``
+        and duplicates removed; the ``Threshold`` post-selection still applies
+        within the list, as in EasySpin.  With ``Method='hybrid'`` the levels
+        are those of the exactly treated core.  Not available with
+        ``Method='perturb*'`` (raises).
     Verbosity:
         Output verbosity: 0 = silent, 1 = progress, 2 = detailed.
     BatchSize:
@@ -331,6 +371,28 @@ class Options:
         = automatic: all orientations at once, capped so that the batched
         Hamiltonians (orientations × field knots × dim²) stay below ~400 MB.
         Set to 1 for sequential processing (debugging/low-memory systems).
+    Enhancement:
+        :func:`~torchspin.endorfrq.endorfrq` and :func:`~torchspin.salt.salt`
+        only (EasySpin ``Opt.Enhancement``).  ``False`` (default, as in
+        EasySpin): the rf transition operator is the nuclear magnetic moment
+        only.  ``True``: it is the total magnetic moment (electron + nuclear,
+        the moment operators of :func:`~torchspin.ham.ham`), projected on the
+        same rf directions, which includes hyperfine enhancement.  Transition
+        selection (``Threshold``) still uses the nuclear-only rates, and
+        electronic (EPR) level pairs are excluded, as in EasySpin.  ``salt``
+        then always uses the matrix ENDOR path (its automatic first-order
+        perturbation shortcut has no enhancement); ``endorfrq_perturb``
+        raises.
+    ZeroField:
+        :func:`pepper` frequency sweeps and :func:`salt` fixed-field ENDOR only.
+        ``False`` (default): ``Experiment.Field`` must be positive.  ``True``:
+        ``Experiment.Field = 0`` is allowed (zero-field EPR/FDMR, zero-field
+        ENDOR).  The levels are then grouped into degenerate clusters (relative
+        tolerance 1e-9 of the level spread) and every transition between two
+        clusters carries the rate summed over all its level pairs, so that the
+        intensities do not depend on the arbitrary eigenbasis inside a
+        degenerate (e.g. Kramers) subspace.  The isotropic O3 shortcut is
+        replaced by a D2h grid.  See KNOWN_LIMITATIONS.md.
     QuadraticZeeman:
         Include the field-quadratic and field-cubic higher-order Zeeman terms of
         ``Sys.Ham`` (orders lB = 2 and 3) in the resonance search, so that
@@ -363,6 +425,9 @@ class Options:
     ModellingAccuracy: float = 2e-6   # resonance search: segment-model accuracy relative to mwFreq (EasySpin Opt.ModellingAccuracy)
     device: str = 'cpu'
     QuadraticZeeman: bool = False     # include lB = 2, 3 Sys.Ham terms in the resonance search (default: dropped)
+    Enhancement: bool = False         # ENDOR hyperfine enhancement (EasySpin Opt.Enhancement), endorfrq/salt matrix paths
+    ZeroField: bool = False           # allow Experiment.Field = 0 (pepper frequency sweeps, salt fixed field)
+    Transitions: Union[str, List[Tuple[int, int]], None] = None   # EasySpin Opt.Transitions: None, 'all' or 1-based (u, v) pairs
 
     @property
     def grid_size_coarse(self) -> int:

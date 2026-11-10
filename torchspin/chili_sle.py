@@ -914,6 +914,8 @@ def chili_sle(sys, exp, opt: Optional[ChiliSLEOptions] = None):
     verbose = opt.Verbosity >= 1
 
     # ---- system checks ------------------------------------------------------
+    from torchspin.spinsystem import _reject_h0extra
+    _reject_h0extra(sys, 'chili')
     if getattr(sys, 'n', None) is not None and any(v > 1 for v in sys.n) and not opt.PostConvNucs:
         raise ValueError("chili cannot handle sets of equivalent nuclei (Sys.n > 1) unless treated by post-convolution (Opt.PostConvNucs).")
     if getattr(sys, 'nn', None) is not None and bool(torch.any(torch.as_tensor(sys.nn) != 0)):
@@ -956,6 +958,8 @@ def chili_sle(sys, exp, opt: Optional[ChiliSLEOptions] = None):
     use_potential = potential is not None
 
     # ---- experiment ---------------------------------------------------------
+    from torchspin.experiment import require_positive_field
+    require_positive_field(exp)          # Field = 0 is a pepper/salt-only option
     field_sweep = not exp.is_freq_swept
     nPoints = int(exp.nPoints)
     if field_sweep:

@@ -197,6 +197,8 @@ and `resfreqs_perturb` always). A negative field still raises in the constructor
   difference is a few % because at a small field a line near a bin edge is split over
   two bins.
 
+- `salt` with `Options.ZeroField` and `Options.Enhancement` (0.7.3) together raises `NotImplementedError`: the zero-field cluster path sums nuclear-only rates.
+
 ## Higher-order Zeeman terms (`Sys.Ham*`): deliberate deviation from EasySpin (0.6.7)
 
 `ham(Sys)` returns `(H0, mux, muy, muz)` with H(B) = H0 − μ·B. The simulators that

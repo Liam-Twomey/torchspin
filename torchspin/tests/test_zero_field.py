@@ -336,3 +336,11 @@ class TestSaltZeroField:
         f, y = salt(s, Experiment(Field=0, mwFreq=0.0312, ExciteWidth=5.0), ZF,
                     freq_range=(1, 40), n_points=401, lw_mhz=0.3)
         assert torch.isfinite(y).all() and float(y.abs().max()) > 0
+
+
+def test_zero_field_salt_rejects_enhancement():
+    """Options.ZeroField with Options.Enhancement (0.7.3): zero-field ENDOR uses nuclear-only rates, so salt raises."""
+    sy = SpinSystem(S=0.5, g=[2.0, 2.0, 2.0], Nucs='14N', A=[10.0, 10.0, 20.0], Q=[-0.5, -0.5, 1.0])
+    with pytest.raises(NotImplementedError, match="Enhancement"):
+        salt(sy, Experiment(Field=0.0), Options(ZeroField=True, Enhancement=True, GridSize=10),
+             freq_range=(0.0, 30.0), n_points=301)

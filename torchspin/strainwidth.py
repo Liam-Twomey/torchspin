@@ -658,6 +658,7 @@ def compute_strain_widths_freq_batch(
     theta_batch: torch.Tensor,  # (M,)
     B0: float,                  # static field (mT), the same for all orientations
     pairs_list: list,           # M items, each (nTrans_m, 2) int tensor or None
+    clusters: Optional[torch.Tensor] = None,   # (n,) degenerate-cluster label per level (zero field)
 ) -> list:
     """Frequency-domain strain widths (MHz) for frequency-swept spectra.
 
@@ -670,6 +671,11 @@ def compute_strain_widths_freq_batch(
 
     without the field conversion factor (no dBdE).  Returns a list of M
     tensors ``(nTrans_m,)`` in MHz (None where the orientation has no pairs).
+
+    ``clusters`` (zero field, ``Options.ZeroField``): every diagonal element
+    ``<u|op|u>`` is replaced by its mean over the degenerate cluster of ``u``,
+    ``tr(P_a op)/n_a``, which does not depend on the eigenbasis inside the
+    cluster.
     """
     if not _has_any_strain(sys):
         return [None] * len(pairs_list)
@@ -682,10 +688,21 @@ def compute_strain_widths_freq_batch(
     _, V_b = _eigh(H_b)
     V_c = V_b.to(torch.complex128)
 
-    def diag_in_eigbasis(op):
-        return torch.real((V_c.conj() * (op.to(torch.complex128).unsqueeze(0) @ V_c)).sum(dim=1))  # (M, n)
+    if clusters is None:
+        def _cavg(d):
+            return d
+    else:
+        _lab = clusters.to(device=device, dtype=torch.long)
+        _oh = torch.zeros(_lab.numel(), int(_lab.max()) + 1, dtype=torch.float64, device=device)
+        _oh[torch.arange(_lab.numel(), device=device), _lab] = 1.0
 
-    muzL_diag = torch.real((V_b.conj() * (muzL_batch @ V_b)).sum(dim=1))
+        def _cavg(d):                                             # (M, n) -> cluster means per level
+            return ((d @ _oh) / _oh.sum(dim=0))[:, _lab]
+
+    def diag_in_eigbasis(op):
+        return _cavg(torch.real((V_c.conj() * (op.to(torch.complex128).unsqueeze(0) @ V_c)).sum(dim=1)))  # (M, n)
+
+    muzL_diag = _cavg(torch.real((V_b.conj() * (muzL_batch @ V_b)).sum(dim=1)))
     lw2_H = torch.zeros(M, dtype=torch.float64, device=device)
     if sys.HStrain is not None:
         lw2_H = ((sys.HStrain.to(device=device, dtype=torch.float64) ** 2).unsqueeze(0) * zLab_M ** 2).sum(dim=1)

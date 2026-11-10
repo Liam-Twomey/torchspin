@@ -69,6 +69,11 @@ class Experiment:
           triplets, S=1 systems).
     Field:
         Fixed static field in mT (frequency-swept mode).  ``None`` = field-swept.
+        Must be positive; ``Field = 0`` (zero-field frequency sweeps and
+        fixed-field ENDOR) is accepted by :func:`pepper` and :func:`salt` only
+        with ``Options(ZeroField=True)``.  Every other simulator, and pepper/salt
+        without that option, raise the usual "must be positive" error when they
+        are called.
     mwRange:
         Microwave frequency sweep range ``[nu_lo, nu_hi]`` in GHz
         (frequency-swept mode).  ``None`` = field-swept.
@@ -143,11 +148,13 @@ class Experiment:
                 raise ValueError("Experiment.mwRange must be [nu_lo, nu_hi] in GHz.")
             if self.mwRange[0] >= self.mwRange[1]:
                 raise ValueError("Experiment.mwRange[1] must be larger than mwRange[0].")
-            if self.Field <= 0:
+            # Field = 0 is held back until a simulator sees the Options
+            # (Options.ZeroField, see require_positive_field).
+            if self.Field < 0:
                 raise ValueError("Experiment.Field must be positive (mT).")
         elif self.is_fixed_field:
             # Fixed-field mode validation (ENDOR)
-            if self.Field <= 0:
+            if self.Field < 0:
                 raise ValueError("Experiment.Field must be positive (mT).")
         else:
             # Field-swept mode validation.  Range may be omitted (automatic sweep
@@ -166,6 +173,26 @@ class Experiment:
             raise ValueError("Harmonic must be 0, 1, or 2.")
         if self.nPoints < 2:
             raise ValueError("nPoints must be at least 2.")
+
+
+def require_positive_field(exp, opt=None) -> bool:
+    """Reject ``Experiment.Field = 0`` unless ``opt.ZeroField`` allows it.
+
+    :class:`Experiment` cannot see the Options, so it accepts ``Field = 0`` in
+    frequency-swept and fixed-field mode and every simulator that reads
+    ``exp.Field`` calls this first: without ``Options(ZeroField=True)`` it raises
+    the same ``ValueError`` that Experiment raises for a negative field.  Returns
+    True when the experiment is a permitted zero-field one.
+    """
+    if exp is None or getattr(exp, 'Field', None) is None:
+        return False
+    if not (exp.is_freq_swept or exp.is_fixed_field):
+        return False
+    if float(exp.Field) > 0:
+        return False
+    if float(exp.Field) == 0 and bool(getattr(opt, 'ZeroField', False)):
+        return True
+    raise ValueError("Experiment.Field must be positive (mT).")
 
 
 VALID_METHODS = frozenset({
@@ -270,6 +297,16 @@ class Options:
         = automatic: all orientations at once, capped so that the batched
         Hamiltonians (orientations × field knots × dim²) stay below ~400 MB.
         Set to 1 for sequential processing (debugging/low-memory systems).
+    ZeroField:
+        :func:`pepper` frequency sweeps and :func:`salt` fixed-field ENDOR only.
+        ``False`` (default): ``Experiment.Field`` must be positive.  ``True``:
+        ``Experiment.Field = 0`` is allowed (zero-field EPR/FDMR, zero-field
+        ENDOR).  The levels are then grouped into degenerate clusters (relative
+        tolerance 1e-9 of the level spread) and every transition between two
+        clusters carries the rate summed over all its level pairs, so that the
+        intensities do not depend on the arbitrary eigenbasis inside a
+        degenerate (e.g. Kramers) subspace.  The isotropic O3 shortcut is
+        replaced by a D2h grid.  See KNOWN_LIMITATIONS.md.
     """
 
     Method: str = 'matrix'
@@ -289,6 +326,7 @@ class Options:
     Stretch: float = 0.25             # automatic sweep range padding factor (EasySpin garlic Opt.Stretch)
     ModellingAccuracy: float = 2e-6   # resonance search: segment-model accuracy relative to mwFreq (EasySpin Opt.ModellingAccuracy)
     device: str = 'cpu'
+    ZeroField: bool = False           # allow Experiment.Field = 0 (pepper frequency sweeps, salt fixed field)
 
     @property
     def grid_size_coarse(self) -> int:

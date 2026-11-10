@@ -231,6 +231,7 @@ def resfreqs_batch(
     photo_weights: Optional[torch.Tensor] = None,
     R_batch: Optional[torch.Tensor] = None,
     pairs: Optional[list] = None,
+    zero_field: bool = False,
 ) -> tuple:
     """Resonance frequencies for a batch of orientations at fixed ``exp.Field``
     (frequency-swept spectra), with the same interface and conventions as
@@ -247,6 +248,16 @@ def resfreqs_batch(
 
     Returns ``(pos_list, intens_list, widths_list[, pairs_list])`` with one
     tensor per orientation.
+
+    ``zero_field=True`` (``Exp.Field = 0`` with ``Options.ZeroField``): the
+    Hamiltonian is ``H0`` for every orientation and is diagonalized once; the
+    levels are grouped into degenerate clusters
+    (:func:`torchspin._zerofield.level_clusters`) and each returned transition
+    is a pair of clusters, with the rate·polarization summed over all its level
+    pairs, the position the difference of the cluster mean energies, and the
+    level pair ``(first level of the lower cluster, first level of the upper
+    cluster)`` as its label (also the form ``pairs`` must take).  Transitions
+    inside a cluster (zero frequency) are not returned.
     """
     dev = H0.device
     M = phi_batch.shape[0]
@@ -256,14 +267,38 @@ def resfreqs_batch(
     zL = torch.stack([torch.sin(th) * torch.cos(ph), torch.sin(th) * torch.sin(ph), torch.cos(th)], dim=1)  # (M,3)
     zc = zL.to(dtype=mux.dtype)
     muzL_b = zc[:, 0, None, None] * mux + zc[:, 1, None, None] * muy + zc[:, 2, None, None] * muz  # (M,n,n)
-    H_b = H0.unsqueeze(0) - B0 * muzL_b
-    E_b, V_b = _eigh(H_b)
     n = H0.shape[0]
-    if pairs is not None:
-        iu = torch.tensor([p_[0] for p_ in pairs], dtype=torch.long, device=dev)
-        ju = torch.tensor([p_[1] for p_ in pairs], dtype=torch.long, device=dev)
+    zf = None
+    if zero_field:
+        if init_state is not None:
+            raise ValueError('Options.ZeroField cannot be combined with non-equilibrium populations (Sys.initState).')
+        # B = 0: one Hamiltonian for all orientations, diagonalized once
+        from torchspin._zerofield import level_clusters, cluster_means, inter_cluster_pairs
+        E0, V0 = _eigh(H0)
+        E_b, V_b = E0.unsqueeze(0).expand(M, n), V0.unsqueeze(0).expand(M, n, n)
+        labels, first, onehot = level_clusters(E0)
+        K = first.numel()
+        iu, ju, ca, cb = inter_cluster_pairs(labels)
+        key = ca * K + cb
+        if pairs is not None:
+            want = {(int(a_), int(b_)) for a_, b_ in pairs}
+            ok = torch.tensor([(int(first[a_]), int(first[b_])) in want for a_, b_ in zip(ca.tolist(), cb.tolist())],
+                              dtype=torch.bool, device=dev)
+            iu, ju, key = iu[ok], ju[ok], key[ok]
+        ukey, inv = torch.unique(key, return_inverse=True)
+        ua, ub = ukey // K, ukey % K
+        Ebar = cluster_means(E0, onehot)
+        zf = dict(labels=labels, inv=inv, n_cp=ukey.numel(),
+                  freq=(Ebar[ub] - Ebar[ua]) * 1e-3,                       # GHz
+                  iu_c=first[ua], ju_c=first[ub])
     else:
-        iu, ju = torch.triu_indices(n, n, offset=1, device=dev)
+        H_b = H0.unsqueeze(0) - B0 * muzL_b
+        E_b, V_b = _eigh(H_b)
+        if pairs is not None:
+            iu = torch.tensor([p_[0] for p_ in pairs], dtype=torch.long, device=dev)
+            ju = torch.tensor([p_[1] for p_ in pairs], dtype=torch.long, device=dev)
+        else:
+            iu, ju = torch.triu_indices(n, n, offset=1, device=dev)
     from torchspin.excitation import excitation_geometry, exp_mw_mode
     geom = excitation_geometry(exp_mw_mode(exp))
     pos_list, int_list, wid_list, pairs_list = [], [], [], []
@@ -325,19 +360,30 @@ def resfreqs_batch(
         intens = rate * polar
         if photo_weights is not None:
             intens = intens * float(photo_weights[m])
-        freq = (E[ju] - E[iu]) * 1e-3                                # GHz
+        if zf is not None:
+            # sum over the level pairs of every cluster pair (basis invariant)
+            intens = torch.zeros(zf['n_cp'], dtype=intens.dtype, device=dev).index_add(0, zf['inv'], intens)
+            freq = zf['freq']
+            iu_o, ju_o = zf['iu_c'], zf['ju_c']
+        else:
+            freq = (E[ju] - E[iu]) * 1e-3                                # GHz
+            iu_o, ju_o = iu, ju
         keep = torch.ones_like(intens, dtype=torch.bool)
         if opt.Threshold > 0 and intens.numel() > 0:
             mx_i = intens.abs().max().item()
             if mx_i > 0:
                 keep = intens.abs() >= opt.Threshold * mx_i
         pos_list.append(freq[keep]); int_list.append(intens[keep])
-        pairs_list.append(torch.stack([iu[keep], ju[keep]], dim=1))
+        pairs_list.append(torch.stack([iu_o[keep], ju_o[keep]], dim=1))
         wid_list.append(None)
     if sys is not None:
         from torchspin.strainwidth import compute_strain_widths_freq_batch, _has_any_strain
         if _has_any_strain(sys):
-            w = compute_strain_widths_freq_batch(sys, H0, muzL_b, ph, th, B0, pairs_list)
+            if zf is not None:
+                w = compute_strain_widths_freq_batch(sys, H0, muzL_b, ph, th, B0, pairs_list,
+                                                     clusters=zf['labels'])
+            else:
+                w = compute_strain_widths_freq_batch(sys, H0, muzL_b, ph, th, B0, pairs_list)
             wid_list = [None if x is None else x * 1e-3 for x in w]
     if return_pairs:
         return pos_list, int_list, wid_list, pairs_list

@@ -956,6 +956,8 @@ def chili_sle(sys, exp, opt: Optional[ChiliSLEOptions] = None):
     use_potential = potential is not None
 
     # ---- experiment ---------------------------------------------------------
+    from torchspin.experiment import require_positive_field
+    require_positive_field(exp)          # Field = 0 is a pepper/salt-only option
     field_sweep = not exp.is_freq_swept
     nPoints = int(exp.nPoints)
     if field_sweep:

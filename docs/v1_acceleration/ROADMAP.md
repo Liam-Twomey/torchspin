@@ -22,12 +22,20 @@ merged only once the measured gains are confirmed. The audit behind this roadmap
 
 | Phase | Scope | Status |
 |---|---|---|
-| 1 | Foundations: thread budget (`torchspin.parallel`), correctness fixes found in the audit (cardamom seeding, `sigeq` device, an empty GPU test), benchmark baselines and regression comparator, SLURM template | in progress |
-| 2 | esfit: parallel finite-difference Jacobians (levmar, trf, lbfgsb, uncertainties), opt-in autograd Jacobian, per-worker GPU pinning | planned |
-| 3 | pepper: device-resident post-processing (slot assembly, interpolation, strain accumulation, shared torch kernels with `pepper_autograd`), drop the duplicate strain-width diagonalization | planned |
-| 4 | saffron orientation batching and closed-form time domain; chili basis Liouvillians and an orientation pool; cardamom batched propagators and prefix scans | planned |
-| 5 | Cluster and multi-GPU execution (`executor=` hook, sharding with exact reductions, fit checkpointing); opt-in float32 paths | planned |
-| 6 | GPU eigensolver for matrices larger than 32×32; spidyan torch port | planned |
+| 1 | Foundations: thread budget (`torchspin.parallel`), correctness fixes found in the audit (cardamom seeding, `sigeq` device, an empty GPU test), benchmark baselines and regression comparator, SLURM template | done (speed-neutral, as intended) |
+| 2 | esfit: parallel finite-difference Jacobians (levmar, trf, lbfgsb, uncertainties), per-worker GPU pinning (`FitOptions.devices`), `simulate_batch` pool reuse; OpenMP wait policy and memory-aware `n_workers='auto'` (released as 0.6.3–0.6.5) | done; opt-in autograd Jacobian shelved (slower than finite differences) |
+| 3 | pepper: device-resident post-processing (slot assembly, interpolation, strain accumulation, shared torch kernels with `pepper_autograd`), drop the duplicate strain-width diagonalization | **dropped**: CPU-first (see Decision) |
+| 4 | saffron orientation batching and closed-form time domain; chili basis Liouvillians and an orientation pool; cardamom batched propagators and prefix scans | open (CPU work) |
+| 5 | Cluster execution (`executor=` hook, sharding with exact reductions, fit checkpointing); opt-in float32 paths | open (CPU/cluster parts) |
+| 6 | GPU eigensolver for matrices larger than 32×32; spidyan torch port | **dropped** (GPU part): CPU-first |
+
+**Decision (2026-11-09): CPU first.** Measured on a cluster node, one 64-core CPU node with
+`simulate_batch` workers produced 1473 Cu(II) spectra/s against 76 on one A100, and the
+CUDA path leaves the GPU at 8–16 % utilization because most of the work is host-side.
+For fits on laptops and workstations, worker processes are the effective route as well.
+CPU nodes are also what most users have the most access to. GPU work (Phases 3 and 6) is
+therefore dropped; `device='cuda'` stays supported and tested, but is not optimized
+further. Future acceleration work targets CPU parallelism (Phases 4–5).
 
 ## Results log
 

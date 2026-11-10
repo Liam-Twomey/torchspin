@@ -21,7 +21,7 @@ equals pepper's to rounding, and the harmonic/line shape are EasySpin's.
 Supported: field sweeps, ``Opt.Method='matrix'`` and ``'perturb*'`` (pepper's
 perturbation route: single electron, no strain), every grid symmetry, ``GridSize`` int or ``[N, Ninterp]``,
 ``Harmonic`` 0-2, global ``lw``/``lwpp`` (Gaussian and/or Lorentzian, tensors
-allowed), ``Temperature``, strains.  Strains (HStrain, gStrain, AStrain on the graph; DStrain magnitudes are
+allowed), ``Temperature``, strains, ``Opt.Transitions`` (matrix route only).  Strains (HStrain, gStrain, AStrain on the graph; DStrain magnitudes are
 constants) use the summation branch.  ``ModAmp`` (pseudo-modulation, torch).  Not yet: ``mwPhase``, ordering,
 photoselection, crystals, frequency sweeps (these raise ``NotImplementedError``).
 """
@@ -562,6 +562,14 @@ def _pepper_autograd_single(sys: SpinSystem, exp: Experiment, opt: Options) -> t
                     f"Options.QuadraticZeeman=True with field-quadratic/cubic Sys.Ham terms; "
                     f"use Method='matrix'.")
             zho = tuple(None if g is None else g.to(device) for g in field_nonlinear_zeeman_ops(sys))
+    # Opt.Transitions (as in pepper): user level pairs replace the pre-selection;
+    # 'all' also switches the intensity post-selection off
+    user_tr = getattr(opt, 'Transitions', None)
+    if user_tr is not None and str(opt.Method).startswith('perturb'):
+        raise ValueError("Options.Transitions cannot be used with perturbation theory "
+                         f"(Options.Method='{opt.Method}'); use Method='matrix'.")
+    user_pairs, trans_all = _pep._user_transitions(user_tr, H0.shape[0]) if user_tr is not None else (None, False)
+    post_thr = 0.0 if trans_all else float(opt.Threshold)
     if use_perturb:
         from torchspin.resfields_perturb import resfields_perturb_batch
         _w = B_hi - B_lo
@@ -570,10 +578,13 @@ def _pepper_autograd_single(sys: SpinSystem, exp: Experiment, opt: Options) -> t
         for j in range(n_orient):
             all_B[j], all_I[j] = B_list[j], I_list[j]          # index-matched slots, no level pairs
     else:
-        with torch.no_grad():
-            pairs = _pep._preselect_pairs(H0.detach().cpu(), mux.detach().cpu(), muy.detach().cpu(), muz.detach().cpu(),
-                                          sys, exp, opt, 0.5 * (B_lo + B_hi),
-                                          zeeman_ho=None if zho is None else tuple(None if g is None else g.cpu() for g in zho))
+        if user_pairs is not None:
+            pairs = user_pairs
+        else:
+            with torch.no_grad():
+                pairs = _pep._preselect_pairs(H0.detach().cpu(), mux.detach().cpu(), muy.detach().cpu(), muz.detach().cpu(),
+                                              sys, exp, opt, 0.5 * (B_lo + B_hi),
+                                              zeeman_ho=None if zho is None else tuple(None if g is None else g.cpu() for g in zho))
         opt_rf = _dc_replace(opt, Threshold=0.0)
         batch = auto_batch_size(opt.BatchSize, H0.shape[0], n_orient)
         for s in range(0, n_orient, batch):
@@ -587,9 +598,9 @@ def _pepper_autograd_single(sys: SpinSystem, exp: Experiment, opt: Options) -> t
         return x, torch.zeros(nPoints, dtype=_F64)
     has_strain = any(w is not None and w.numel() > 0 for w in all_Wl)
     if has_strain:
-        B_c, I_c, W_c = _slots_t(all_B, all_I, all_P, n_orient, float(opt.Threshold), all_W=all_Wl)
+        B_c, I_c, W_c = _slots_t(all_B, all_I, all_P, n_orient, post_thr, all_W=all_Wl)
     else:
-        B_c, I_c = _slots_t(all_B, all_I, all_P, n_orient, float(opt.Threshold))
+        B_c, I_c = _slots_t(all_B, all_I, all_P, n_orient, post_thr)
         W_c = None
     if opt.Verbosity >= 1:
         print(f'pepper_autograd: {n_orient} orientations, {B_c.shape[0]} transition slots, grid {grid_sym}')

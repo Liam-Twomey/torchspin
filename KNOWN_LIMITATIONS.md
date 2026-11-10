@@ -146,6 +146,46 @@ on a finer grid and reports what changed — the only trustworthy test, and the
 one used to produce the table above.  The two `cupc_grid19_4N_*` cases are kept in the validation suite as
 the record of this.
 
+## Simulator — transition selection, `Options.Transitions` (0.7.5)
+
+`Options.Transitions` (EasySpin `Opt.Transitions`) replaces pepper's automatic
+transition pre-selection by `'all'` or a list of 1-based level pairs `(u, v)`.
+Levels are numbered by ascending energy at each resonance field, so a pair follows
+the energy ordering through level crossings, as in EasySpin; it does not follow a
+state label such as mS.
+
+- **Threshold.** `'all'` switches the `Threshold` intensity post-selection off. With a
+  list, the post-selection still applies within the list (a transition is dropped when
+  its maximum intensity is below `Threshold` × the strongest selected one), as in
+  EasySpin. To decompose a spectrum into disjoint sets of transitions whose sum equals
+  the union, pass `Threshold=0` (and `HybridIntThreshold=0` with `Method='hybrid'`).
+  The sum then agrees with the union to ~1e-9 relative, not to the last bit: the
+  adaptive field knots of the resonance search depend on the selected pairs.
+- **Crystal and O3 paths** apply `Threshold` per orientation (pre-existing behavior),
+  not per transition over all orientations as EasySpin does.
+- **Paths that raise.** `Method='perturb'`/`'perturb1'`/`'perturb2'` raise
+  `ValueError` when `Transitions` is set; EasySpin's perturbation solvers ignore the
+  option silently. With `Method='hybrid'` the level numbers refer to the exactly
+  treated core.
+- **Validation is stricter than EasySpin.** Out-of-range indices, u = v, non-integer
+  indices and an empty list raise; EasySpin silently drops rows above the number of
+  levels and keeps duplicate rows (counting those transitions twice). torchspin
+  removes duplicates.
+- **Frequency sweeps.** `'all'` takes every pair of the full (electron × nuclear) level
+  space. EasySpin's `resfreqs_matrix` builds `'all'` from the electron levels only and
+  keeps its post-selection threshold; the two agree for systems without nuclei.
+- Only `pepper` and `pepper_autograd` read the field; `garlic`, `salt` and the other
+  simulators ignore it. (`SaffronOptions.Transitions` is a separate, unrelated field.)
+- EasySpin agreement (9 cases: S=3/2 central/outer/all transitions in a powder, with
+  HStrain and in a crystal; the S=1 half-field line; a frequency sweep): cosine ≥ 0.99997,
+  amplitude within 0.05 % except the frequency sweep (amplitude 0.984 for pair (1,2)).
+  That deviation predates the option: for the same triplet (D = 3000 MHz, 340 mT) the
+  default frequency sweep is 0.989 of EasySpin's amplitude and pair (2,3) alone 0.971,
+  at cosine 0.99997.
+- **Zero field (`Options.ZeroField`, 0.7.4).** Degenerate levels are merged into clusters, and a
+  transition is labelled by the first (lowest-numbered) level of each cluster; a listed pair selects
+  a zero-field line only when it names those first levels (`'all'` selects every line).
+
 ## Pepper and salt — zero field, `Options.ZeroField` (0.7.4)
 
 `Options(ZeroField=True)` lets `pepper` frequency sweeps (zero-field EPR/FDMR) and

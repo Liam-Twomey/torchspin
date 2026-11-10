@@ -990,6 +990,38 @@ def _projecttriangles(
     return spec
 
 
+def _user_orientations(exp):
+    """Exp.Orientations / Exp.OrientationWeights as float64 tensors
+    ``(phi, theta, w)`` (molecular frame, radians; weights default 1/N), or
+    ``None`` when no orientation list is given.  Tensors keep their graph."""
+    ori = getattr(exp, 'Orientations', None)
+    if ori is None:
+        return None
+    ori = ori if torch.is_tensor(ori) else torch.as_tensor(np.asarray(ori, dtype=float))
+    ori = ori.to(torch.float64).reshape(-1, 2)
+    w = getattr(exp, 'OrientationWeights', None)
+    if w is None:
+        w = torch.full((ori.shape[0],), 1.0 / ori.shape[0], dtype=torch.float64)
+    else:
+        w = (w if torch.is_tensor(w) else torch.as_tensor(np.asarray(w, dtype=float))).to(torch.float64).reshape(-1)
+    return ori[:, 0], ori[:, 1], w
+
+
+def _check_user_orientations(exp, opt) -> None:
+    """Exp.Orientations cannot be combined with sample-orientation or ordering
+    fields, nor with the per-transition/per-site outputs."""
+    for name in ('Ordering', 'SampleFrame', 'SampleRotation', 'MolFrame', 'CrystalSymmetry'):
+        v = getattr(exp, name, None)
+        if v is not None and not (isinstance(v, str) and v == ''):
+            raise ValueError(f'Exp.Orientations cannot be combined with Exp.{name}: the orientations '
+                             f'are field directions in the molecular frame of a disordered sample.')
+    if getattr(opt, 'Sites', None) is not None:
+        raise ValueError('Exp.Orientations cannot be combined with Opt.Sites (crystal sites).')
+    if str(getattr(opt, 'separate', '') or '') in ('transitions', 'sites'):
+        raise ValueError(f"Exp.Orientations does not support Opt.separate='{opt.separate}'; "
+                         f"use '' or 'orientations'.")
+
+
 def pepper(sys_or_list, exp: Experiment, opt: Optional[Options] = None):
     """Field-swept CW EPR powder spectrum.
 
@@ -1220,6 +1252,11 @@ def _pepper_single(
             raise ValueError('For partially ordered samples, Ci grid symmetry is required.')
     if getattr(sys, 'initState', None) is not None and grid_sym == 'Dinfh' and opt.GridSymmetry in ('auto', ''):
         grid_sym = 'D2h'
+    # Exp.Orientations: user-supplied field directions (molecular frame) replace
+    # the powder grid; GridSize/GridSymmetry are not used.
+    user_ori = _user_orientations(exp)
+    if user_ori is not None:
+        _check_user_orientations(exp, opt)
 
     # -----------------------------------------------------------------------
     # Step 1: Build field-independent Hamiltonian and moment operators
@@ -1421,6 +1458,14 @@ def _pepper_single(
         phi_arr = torch.atan2(v_mol[:, 1], v_mol[:, 0])
 
     # Move grid arrays to target device
+    if user_ori is not None:
+        # Exp.Orientations: weights are fractions of the sphere; the grid
+        # weights of the powder sum to 4π, so 4π·w keeps pepper's amplitude.
+        phi_arr = user_ori[0].detach().clone()
+        theta_arr = user_ori[1].detach().clone()
+        weights_arr = 4.0 * math.pi * user_ori[2].detach().clone()
+        n_orient = phi_arr.shape[0]
+
     phi_arr     = phi_arr.to(device)
     theta_arr   = theta_arr.to(device)
     weights_arr = weights_arr.to(device)
@@ -1509,6 +1554,68 @@ def _pepper_single(
                 raise ValueError('For partially ordered samples, only a single sample rotation can be used.')
             R_L2S = R_L2S @ _rotaxi2mat(np.asarray(axis_, dtype=float), float(rho_[0]))
         _ordering = (ordering_fun, R_L2S)
+
+    if user_ori is not None:
+        # ---------------------------------------------------------------
+        # Exp.Orientations: sum of stick spectra over the given molecular-
+        # frame field directions, χ-averaged rates as for a powder (no R_batch),
+        # amplitude I·4π·w; every line is accumulated with an exact template at
+        # its exact position (as on the O3 and crystal paths) — Gaussian
+        # (strain width, or Sys.lw(1)) or Lorentzian (Sys.lw(2) alone) — and the
+        # rest of Sys.lw is convolved afterwards.  No interpolation/projection.
+        # ---------------------------------------------------------------
+        _min_fwhm0 = dx / 100.0
+        use_pt = (sys.nElectrons == 1 and not has_strain
+                  and not (sys.S[0] > 0.5 and sys.D is not None)
+                  and _pt_ok and str(opt.Method).startswith('perturb'))
+        lines = []          # (B, I, W) per orientation, numpy
+        if use_pt:
+            Bl, Il = resfields_perturb_batch(sys, phi_arr, theta_arr, exp_search, opt, order=pt_order,
+                                             return_full=True, photo_weights=_pw(0, n_orient))
+            for k in range(n_orient):
+                B0 = Bl[k].detach().cpu().numpy(); I0 = Il[k].detach().cpu().numpy()
+                keep = np.isfinite(B0) & (I0 != 0)
+                lines.append((B0[keep], I0[keep], np.zeros(int(keep.sum()))))
+        else:
+            batch_size = _orientation_batch_size(n_orient)
+            for s0 in range(0, n_orient, batch_size):
+                e0 = min(s0 + batch_size, n_orient)
+                Bl, Il, Wl = _resonances(phi_arr[s0:e0], theta_arr[s0:e0], exp, opt, sys,
+                                         init_state=init_state, photo_weights=_pw(s0, e0))
+                for k in range(e0 - s0):
+                    B0 = Bl[k].detach().cpu().numpy() if Bl[k] is not None else np.zeros(0)
+                    I0 = Il[k].detach().cpu().numpy() if Il[k] is not None else np.zeros(0)
+                    W0 = (Wl[k].detach().cpu().numpy() if (Wl[k] is not None and Wl[k].numel() == B0.size)
+                          else np.zeros_like(B0))
+                    lines.append((B0, I0, W0))
+        w_np = weights_arr.detach().cpu().numpy()
+        fwhm_g0, fwhm_l0 = lw_effective[0], lw_effective[1]
+
+        def _ori_template(B0, W0, amp0):
+            if has_strain:
+                return _gaussian_bins(x, B0, W0, amp0, _min_fwhm0)
+            if fwhm_g0 > 0:
+                return _gaussian_bins(x, B0, np.full(B0.size, fwhm_g0), amp0, _min_fwhm0)
+            if fwhm_l0 > 0:
+                return _lorentzian_bins(x, B0, np.full(B0.size, fwhm_l0), amp0, _min_fwhm0, phase=mw_phase)
+            return _gaussian_bins(x, B0, np.zeros(B0.size), amp0, _min_fwhm0)   # delta-like sticks
+        if str(opt.separate or '') == 'orientations':
+            spec = torch.stack([_ori_template(B0, W0, I0 * w_np[k]) for k, (B0, I0, W0) in enumerate(lines)])
+        else:
+            B_all = np.concatenate([ln[0] for ln in lines])
+            I_all = np.concatenate([ln[1] * w_np[k] for k, ln in enumerate(lines)])
+            W_all = np.concatenate([ln[2] for ln in lines])
+            spec = _ori_template(B_all, W_all, I_all)
+        spec = spec / dx * (2.0 * math.pi)
+        if has_strain:
+            g_rem, l_rem, deriv_fd = fwhm_g0, fwhm_l0, (fwhm_g0 == 0 and fwhm_l0 == 0)
+        elif fwhm_g0 > 0:
+            g_rem, l_rem, deriv_fd = 0.0, fwhm_l0, (fwhm_l0 == 0)
+        else:
+            g_rem, l_rem, deriv_fd = 0.0, 0.0, True
+        spec = _finish_field_sweep(spec, x, dx, exp, g_rem, l_rem, deriv_fd,
+                                   phase=mw_phase if l_rem > 0 else 0.0)
+        return x, spec
 
     # EasySpin p_sampletype: a crystal needs Exp.MolFrame or Exp.CrystalSymmetry;
     # Exp.SampleFrame/SampleRotation alone describe a (rotated) disordered sample,

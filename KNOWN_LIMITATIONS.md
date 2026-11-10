@@ -182,6 +182,62 @@ state label such as mS.
   That deviation predates the option: for the same triplet (D = 3000 MHz, 340 mT) the
   default frequency sweep is 0.989 of EasySpin's amplitude and pair (2,3) alone 0.971,
   at cosine 0.99997.
+- **Zero field (`Options.ZeroField`, 0.7.4).** Degenerate levels are merged into clusters, and a
+  transition is labelled by the first (lowest-numbered) level of each cluster; a listed pair selects
+  a zero-field line only when it names those first levels (`'all'` selects every line).
+
+## Pepper and salt — zero field, `Options.ZeroField` (0.7.4)
+
+`Options(ZeroField=True)` lets `pepper` frequency sweeps (zero-field EPR/FDMR) and
+`salt` fixed-field ENDOR run at `Experiment.Field = 0`. The default is unchanged in
+results, with one difference in *when* the error appears: `Experiment(Field=0, ...)`
+now constructs, and the familiar `ValueError("Experiment.Field must be positive (mT).")`
+is raised by the simulator call (`pepper`/`salt` without the option; `garlic`, `chili`
+and `resfreqs_perturb` always). A negative field still raises in the constructor.
+
+- **Degenerate levels.** At B = 0 the Hamiltonian is the same for every orientation, and
+  inside a degenerate subspace (Kramers doublets, accidental degeneracies) the eigenbasis
+  is arbitrary. The levels are therefore grouped into clusters (neighbors closer than
+  1e-9 × the level spread, at least 1e-9 MHz, are one cluster). Each transition is a pair
+  of clusters. Its rate·polarization is summed over all level pairs between the two
+  clusters, and its position is the difference of the cluster mean energies. This is done
+  before slot tracking, threshold pruning and pair preselection. Levels that are really
+  split by less than the tolerance are merged. Transitions inside a cluster have zero
+  frequency and are not returned. With `separate='transitions'` the rows are cluster pairs.
+- **Powder average.** The B1 average is taken over the powder grid directions: the
+  perpendicular-mode rate (|μ|² − |n·μ|²)/2 averages to Σ|μ|²/3. The one-orientation O3
+  shortcut is replaced by a D2h grid. The SOPHE quadrature of this quadratic form is
+  accurate to about 1e-4 at `GridSize = 19`.
+- **Strain at B = 0.** gStrain scales with B, so it vanishes. HStrain stays direction
+  dependent (HStrain² · n² over the grid directions n, as in EasySpin, even though no
+  static field defines a direction). For DStrain and AStrain each diagonal element
+  ⟨u|∂H|u⟩ is replaced by its cluster mean tr(P_a ∂H)/n_a. This is exact for Kramers
+  doublets, where time-even operators are proportional to the identity. For accidental
+  non-Kramers degeneracies it ignores the splitting the strain itself would cause.
+- **Not supported.** Non-equilibrium populations (`Sys.initState`) raise with
+  `ZeroField`. Frequency sweeps have no differentiable pepper path (`pepper_autograd`
+  raises for them, as before). The zero-field resonances from `resfreqs_batch`
+  (positions, summed intensities) are on the graph and tested against central
+  differences. Pair preselection does not drop "pure nuclear" transitions at zero field:
+  the high-field heuristic would remove the F = 0 ↔ F = 1 hyperfine line.
+- **salt.** Zero field always uses the matrix path (first-order ENDOR theory needs a
+  quantizing field) and the interpolation/projection powder average. It needs a grid with
+  more than two orientations. Line positions do not depend on orientation, so each line
+  is projected as a delta into one bin. The spectrum is therefore piecewise constant in
+  the line positions: gradients reach the parameters through the intensities, not through
+  the positions. With `ExciteWidth`, the orientation-selection weight leaves out
+  intra-cluster pairs. EasySpin's salt is not compared at zero field; the tests use
+  closed forms and a brute-force cluster sum.
+- **Validation.** pepper matches EasySpin, which accepts `Exp.Field = 0` for frequency
+  sweeps and resolves the degeneracies with the eigenvectors of μ_zL in each degenerate
+  block, on 5 cases (`ref_pepper_zerofield.mat`): cosine ≥ 0.99999999 and amplitude
+  within 4e-6, except the isotropic S = 1/2 + ¹H case (EasySpin keeps the O3 shortcut,
+  so amplitude agrees to 6e-4). Field = 0 agrees with the default path at Field = 1e-4 mT
+  to 1e-11 relative (pepper). For salt the line areas agree to 1e-7; the max-norm
+  difference is a few % because at a small field a line near a bin edge is split over
+  two bins.
+
+- `salt` with `Options.ZeroField` and `Options.Enhancement` (0.7.3) together raises `NotImplementedError`: the zero-field cluster path sums nuclear-only rates.
 
 ## Higher-order Zeeman terms (`Sys.Ham*`): deliberate deviation from EasySpin (0.6.7)
 
@@ -239,6 +295,43 @@ terms are included as H(B) = H0 − B n·μ + B² n·G2·n + B³ G3[n,n,n], whic
 - In the McGavin–Tennant–Weil formalism the field enters as a rank-lB spherical
   tensor, so a pure B²·identity term cannot be written (`Ham200` is ignored by
   `ham_ezho`, as in EasySpin). This does not change transition energies.
+
+## Simulator — extra field-independent operators (`Sys.H0Extra`) (0.7.2)
+
+`SpinSystem.H0Extra = [(coeff, op), ...]` adds Σ coeff·op (MHz) to H0 inside `ham`.
+It is not an EasySpin field, so there is no EasySpin reference: the tests check that a
+zero-field splitting or a hyperfine S·A·I written as an operator reproduces the native
+term (levels, resonance fields, pepper spectra), and that a U term matches a hand-built
+Hamiltonian.
+
+- **Only `ham`-based solvers.** Solvers that assemble the Hamiltonian from the
+  interaction tensors raise `ValueError` when `H0Extra` is set: pepper with
+  `Method='perturb*'` or `'hybrid'` (for a component with nuclei), `pepper_autograd`
+  with `'perturb*'`, `resfields_perturb`, `resfreqs_perturb`, `endorfrq_perturb`,
+  `orisel`, `salt` for one electron spin (its EPR and ENDOR steps use perturbation
+  theory), garlic, chili, fastmotion, cardamom, saffron's fast (ideal-pulse) algorithm,
+  and `nucspinrmv`/`nucspinkeep`/`nucspinadd` (the operator lives on the full spin
+  space and cannot be reduced or extended).
+- **No isotopologue expansion.** Isotope mixtures in `Nucs` (`'Cu'`, `'(63,65)Cu'`) and
+  sets of equivalent nuclei (`n > 1`) are rejected when the spin system is built: the
+  expansion changes the nuclei, so one operator cannot fit every isotopologue. Give
+  explicit isotopes and build one component per isotopologue, scaling the operator
+  yourself if it involves the nucleus.
+- **Heuristics ignore it.** pepper's automatic field range, the rule that drops pure
+  nuclear transitions in the transition pre-selection (it reads `Sys.A`), and the
+  strain widths (`HStrain`, `gStrain`, `AStrain`, `DStrain` act on the native tensors
+  only) do not see `H0Extra`. Give `Exp.Range` explicitly when the extra term moves the
+  lines.
+- **Symmetry.** `hamsymm` always uses the eigenvalue probe for these systems (never the
+  O3 shortcut or the geometric analysis). The probe only tests the candidate frames of
+  the native tensors (molecular frame, gFrame, DFrame, AFrame, ...), so a term whose
+  symmetry axes lie elsewhere is classified in a lower group (down to Ci). This is safe
+  but can cost grid points; pass `Opt.GridSymmetry` to override.
+- **Units and basis.** `op` must be in the full spin-system basis in `sop` order
+  (electrons, nuclei, then orbital momenta); `coeff * op` is in MHz. The operator is
+  checked for shape and Hermiticity (1e-10 relative), and `coeff` must be real.
+- **Gradients.** Reverse mode works through `levels`, `ham` and `pepper_autograd`; forward
+  mode (dual numbers) works through `ham`/`levels`, not through pepper (known issue).
 
 ## Pepper — absolute intensity (fixed 2026-09-01)
 
@@ -329,6 +422,35 @@ Since 2026-09-06 the fixed-field path is differentiable (torch interpolation /
 projection / convolution shared with `pepper_autograd`; gradients vs finite
 differences 1e-6–1e-8 for g, A, Q, lw, `test_salt_autograd.py`); the field-swept
 (multi-field) mode is not and raises for grad tensors.
+
+## ENDOR — hyperfine enhancement (`Options.Enhancement`, 0.7.3)
+
+`Options.Enhancement=True` (default `False`, as in EasySpin) makes the rf operator of
+`endorfrq` and of `salt`'s matrix paths the total moment (electron + nuclear,
+`ham()`'s `mux/muy/muz`) perpendicular to the field, chi-averaged over lab x and y.
+Agreement with EasySpin `endorfrq`/`salt` (`Opt.Enhancement='on'`) is 1e-13 of the
+strongest line per level pair (endorfrq) and cosine > 0.99995 (salt).
+
+- **Selection.** As in EasySpin, `threshold` / `Opt.Threshold` selects on the nuclear-only
+  rates and electronic level pairs are excluded. "Electronic" is decided by EasySpin's
+  rule: energy-sorted levels grouped into blocks of prod(2I+1) and only pairs in the same
+  block kept. This is right when the electron Zeeman (or zero-field) splitting exceeds
+  all nuclear splittings. Near level crossings or at very low field the block assignment,
+  and with it the line list, can be wrong.
+- **Moment operator.** torchspin uses `ham()`'s moments. These also contain orbital
+  Zeeman (`Sys.L`) and linear higher-order Zeeman (`Sys.Ham1xx`) terms. EasySpin uses
+  `ham_ez + ham_nz` only. The two agree for ordinary spin systems. There is no
+  `Opt.Nuclei` subset: all nuclei contribute.
+- **Perturbation theory.** `endorfrq_perturb(..., opt=Options(Enhancement=True))` raises.
+  EasySpin skips enhancement there with a log message. `salt` normally picks first-order
+  perturbation theory by itself for one electron without Q. With `Enhancement=True` it
+  uses the matrix path instead, which is slower (one eigh per orientation).
+- **Intensity scale.** For those one-electron, no-Q systems, the default first-order path
+  uses unit line intensities, while the matrix path uses |⟨i|μ|j⟩|² in (MHz/mT)². So
+  switching `Enhancement` on changes the overall scale by orders of magnitude in addition
+  to the enhancement. Normalize before you compare the two. Systems with Q, or more than
+  one electron, are on the matrix path either way, and their on/off ratio matches
+  EasySpin to 1e-3.
 
 ## Garlic — what is and is not ported
 

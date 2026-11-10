@@ -19,13 +19,16 @@ Algorithm
 from __future__ import annotations
 
 import math
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
 from torchspin.ham import ham
 from torchspin.ham_nz import ham_nz
 from torchspin.spinsystem import SpinSystem
+
+if TYPE_CHECKING:
+    from torchspin.experiment import Options
 
 
 def endorfrq(
@@ -45,6 +48,7 @@ def endorfrq(
     _snmux: Optional[torch.Tensor] = None,
     _snmuy: Optional[torch.Tensor] = None,
     _snmuz: Optional[torch.Tensor] = None,
+    opt: Optional["Options"] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Compute ENDOR transition frequencies at a fixed EPR field.
 
@@ -66,6 +70,18 @@ def endorfrq(
     mwFreq:
         Microwave frequency in GHz.  Currently unused (reserved for
         orientation-selection weighting).
+    opt:
+        Optional :class:`~torchspin.experiment.Options`.  Only
+        ``opt.Enhancement`` is read (``threshold`` stays the explicit
+        argument).  With ``Enhancement=True`` the intensities use the total
+        magnetic moment (electron + nuclear, ``ham()``'s ``mux/muy/muz``)
+        perpendicular to the field instead of the nuclear moment, i.e. they
+        include hyperfine enhancement (EasySpin ``Opt.Enhancement='on'``).
+        As in EasySpin, electronic level pairs are then excluded (levels are
+        grouped by energy into blocks of ``prod(2I+1)``, valid when the
+        electron Zeeman/zero-field splitting exceeds the nuclear splittings)
+        and the ``threshold`` selection uses the nuclear-only rates.
+        ``None`` (default) = ``Enhancement=False``.
 
     Returns
     -------
@@ -83,6 +99,7 @@ def endorfrq(
     """
     if sys.nNuclei == 0:
         raise ValueError("endorfrq: spin system must contain at least one nucleus.")
+    enhancement = bool(getattr(opt, 'Enhancement', False)) if opt is not None else False
 
     # ── Step 1: Build Hamiltonians and moment operators ────────────────────
     # Use pre-built operators when provided (avoids redundant ham() calls in loops).
@@ -122,6 +139,10 @@ def endorfrq(
     # Nuclear moment perpendicular to field
     snmux_perp = nx_x * snmux + nx_y * snmuy + nx_z * snmuz  # lab-x component
     snmuy_perp = ny_x * snmux + ny_y * snmuy + ny_z * snmuz  # lab-y component
+    if enhancement:
+        # Total moment perpendicular to the field (hyperfine enhancement)
+        mux_perp = nx_x * mux + nx_y * muy + nx_z * muz
+        muy_perp = ny_x * mux + ny_y * muy + ny_z * muz
 
     # ── Step 3: Diagonalize H at B_field ──────────────────────────────────
     H_B = H0 - float(B_field) * muzL
@@ -138,6 +159,13 @@ def endorfrq(
         [j for i in range(nStates) for j in range(i + 1, nStates)],
         dtype=torch.long,
     )
+    if enhancement:
+        # EasySpin endorfrq: drop electronic transitions (level pairs in
+        # different blocks of prod(2I+1) energy-sorted levels).
+        n_nuc_states = int(round(math.prod(2.0 * float(i) + 1.0 for i in sys.I)))
+        same_block = (pairs_i_all // n_nuc_states) == (pairs_j_all // n_nuc_states)
+        pairs_i_all = pairs_i_all[same_block]
+        pairs_j_all = pairs_j_all[same_block]
 
     # All transition frequencies (E is ascending from eigh, so E[j]≥E[i])
     freqs_all = (E[pairs_j_all] - E[pairs_i_all]).abs()   # (nPairs,)
@@ -163,6 +191,12 @@ def endorfrq(
     me_y = (V[:, pairs_i_all].conj() * op_y).sum(dim=0)   # (nPairs,)
 
     intens_t  = ((me_x.abs() ** 2 + me_y.abs() ** 2) / 2.0).real
+    if enhancement:
+        op_ex = mux_perp @ V[:, pairs_j_all]
+        me_ex = (V[:, pairs_i_all].conj() * op_ex).sum(dim=0)
+        op_ey = muy_perp @ V[:, pairs_j_all]
+        me_ey = (V[:, pairs_i_all].conj() * op_ey).sum(dim=0)
+        intens_enh = ((me_ex.abs() ** 2 + me_ey.abs() ** 2) / 2.0).real
     freqs_t   = freqs_all
     pairs_i_t = pairs_i_all
     pairs_j_t = pairs_j_all
@@ -180,6 +214,8 @@ def endorfrq(
             keep = intens_t >= threshold * max_i
             freqs_t   = freqs_t[keep]
             intens_t  = intens_t[keep]
+            if enhancement:
+                intens_enh = intens_enh[keep]
             pairs_i_t = pairs_i_t[keep]
             pairs_j_t = pairs_j_t[keep]
 
@@ -188,6 +224,11 @@ def endorfrq(
         empty_i = torch.zeros(0, dtype=torch.float64)
         empty_t = torch.zeros((0, 2), dtype=torch.long)
         return empty_f, empty_i, empty_t
+
+    if enhancement:
+        # Selection above used the nuclear-only rates (EasySpin); report the
+        # enhanced intensities.
+        intens_t = intens_enh
 
     # Sort by frequency (ascending)
     order = torch.argsort(freqs_t)

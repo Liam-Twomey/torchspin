@@ -141,6 +141,18 @@ class SpinSystem:
     lw:
         Linewidth ``[GaussianFWHM, LorentzianFWHM]`` in mT, used by
         ``pepper``.  Defaults to ``[0.0, 0.0]`` (no broadening, as in EasySpin).
+    H0Extra:
+        Extra field-independent Hamiltonian terms, a list of ``(coeff, op)``
+        pairs added to H0 as ``sum(coeff * op)`` (MHz) by :func:`torchspin.ham`
+        on both the ``(H0, mu)`` and the ``ham(sys, B0)`` path.  ``coeff`` is a
+        real scalar (float or 0-d tensor, may require grad); ``op`` is an
+        ``(nStates, nStates)`` Hermitian matrix (tensor or array, real or
+        complex) in the full spin-system basis, ordered as :func:`torchspin.sop`
+        builds it (electrons, then nuclei, then OAMs).  Not an EasySpin field.
+        Solvers that build the Hamiltonian without ``ham()`` (perturbation
+        theory, hybrid, garlic, chili, fastmotion, cardamom, saffron's fast
+        algorithm, nucspinrmv/nucspinkeep/nucspinadd) raise when it is set.
+        Default ``None`` (no extra term).
     """
 
     S: list[float]
@@ -218,6 +230,11 @@ class SpinSystem:
     # Keys: '{lB}{lS}{l}' strings (e.g., '110', '112', '222')
     # Values: (nElectrons, 2*l+1) arrays of coefficients
     Ham: Optional[dict] = None
+    # Generic extra field-independent terms: H0 += sum_k coeff_k * op_k (MHz).
+    # coeff: real scalar (float or 0-d tensor, may require grad); op: (n, n)
+    # Hermitian matrix in the full spin-system basis (torchspin order, as sop
+    # builds it). Default None: no extra term.
+    H0Extra: Optional[list] = None
 
     def __post_init__(self) -> None:
         from torchspin.constants import GFREE
@@ -694,6 +711,10 @@ class SpinSystem:
             if len(self.DStrainCorr) != n_e:
                 raise ValueError(f"DStrainCorr must have {n_e} entries, one per electron spin.")
 
+        # --- H0Extra (generic extra field-independent operators) ---
+        if self.H0Extra is not None:
+            self.H0Extra = _normalize_h0extra(self)
+
     # ------------------------------------------------------------------
     # Read-only derived properties
     # ------------------------------------------------------------------
@@ -1110,6 +1131,7 @@ def nucspinkeep(sys: 'SpinSystem', idx) -> 'SpinSystem':
     --------
     >>> sys2 = nucspinkeep(sys, [0, 2])   # keep nuclei 0 and 2
     """
+    _reject_h0extra(sys, 'nucspinkeep')
     keep = _nucleus_indices(sys, idx)
     return _filter_nuclei(sys, keep)
 
@@ -1133,6 +1155,7 @@ def nucspinrmv(sys: 'SpinSystem', idx) -> 'SpinSystem':
     --------
     >>> sys2 = nucspinrmv(sys, 1)   # remove nucleus 1
     """
+    _reject_h0extra(sys, 'nucspinrmv')
     rmv = _nucleus_indices(sys, idx)
     keep = [i for i in range(sys.nNuclei) if i not in rmv]
     return _filter_nuclei(sys, keep)
@@ -1169,6 +1192,7 @@ def nucspinadd(sys: 'SpinSystem', nuc: str, A=None, Q=None,
     --------
     >>> sys2 = nucspinadd(sys, '1H', A=[5.0, 5.0, 10.0])
     """
+    _reject_h0extra(sys, 'nucspinadd')
     import copy, numpy as np
 
     n_e = sys.nElectrons
@@ -1397,6 +1421,80 @@ def spinvec(sys: 'SpinSystem') -> list:
     [0.5, 1.0]
     """
     return list(sys.Spins.tolist()) if hasattr(sys.Spins, 'tolist') else list(sys.Spins)
+
+
+# ---------------------------------------------------------------------------
+# H0Extra
+# ---------------------------------------------------------------------------
+
+_H0EXTRA_HERM_TOL = 1e-10
+
+
+def _normalize_h0extra(sys: 'SpinSystem') -> Optional[list]:
+    """Validate and normalize ``sys.H0Extra`` to a list of
+    ``(coeff, op)`` = (0-d float64 tensor, (n, n) complex128 tensor) pairs.
+
+    Idempotent (``dataclasses.replace`` re-runs ``__post_init__``) and graph
+    preserving: tensors are converted with ``.to``/``.reshape``, never
+    detached, so a coefficient or operator that requires grad stays on the
+    autograd graph.  An empty list normalizes to ``None``.
+    """
+    terms = sys.H0Extra
+    if isinstance(terms, tuple) and len(terms) == 2 and not isinstance(terms[0], (tuple, list)):
+        raise TypeError("SpinSystem.H0Extra must be a list of (coeff, op) pairs, "
+                        "e.g. H0Extra=[(coeff, op)].")
+    if not isinstance(terms, (list, tuple)):
+        raise TypeError("SpinSystem.H0Extra must be a list of (coeff, op) pairs.")
+    if len(terms) == 0:
+        return None
+    mixtures = [nc for nc in sys.Nucs if is_isotope_mixture(nc)]
+    if mixtures:
+        raise ValueError(
+            f"SpinSystem.H0Extra cannot be combined with isotope mixtures in Nucs "
+            f"({mixtures}): the isotopologue expansion changes the nuclei, so one "
+            f"operator cannot fit every isotopologue. Give explicit isotopes "
+            f"(e.g. '63Cu') and build one component per isotopologue.")
+    if any(v > 1 for v in (sys.n or [])):
+        raise ValueError("SpinSystem.H0Extra cannot be combined with sets of equivalent "
+                         "nuclei (SpinSystem.n > 1): the operator is defined on the full "
+                         "Hilbert space; list each nucleus separately in Nucs.")
+    dim = sys.nStates
+    out = []
+    for k, term in enumerate(terms):
+        if not isinstance(term, (list, tuple)) or len(term) != 2:
+            raise TypeError(f"SpinSystem.H0Extra[{k}] must be a (coeff, op) pair.")
+        coeff, op = term
+        c = coeff if torch.is_tensor(coeff) else torch.as_tensor(np.asarray(coeff))
+        if c.is_complex():
+            raise ValueError(f"SpinSystem.H0Extra[{k}]: coeff must be real (a Hermitian "
+                             f"term needs a real coefficient), got a complex value.")
+        if c.numel() != 1:
+            raise ValueError(f"SpinSystem.H0Extra[{k}]: coeff must be a scalar, got "
+                             f"shape {tuple(c.shape)}.")
+        c = c.to(torch.float64).reshape(())
+        O = op if torch.is_tensor(op) else torch.as_tensor(np.asarray(op))
+        if O.ndim != 2 or tuple(O.shape) != (dim, dim):
+            raise ValueError(
+                f"SpinSystem.H0Extra[{k}]: op has shape {tuple(O.shape)}, expected "
+                f"({dim}, {dim}) for spins {sys.Spins} (full spin-system basis).")
+        O = O.to(torch.complex128)
+        Od = O.detach()
+        scale = max(1.0, float(Od.abs().max()))
+        if float((Od - Od.conj().T).abs().max()) > _H0EXTRA_HERM_TOL * scale:
+            raise ValueError(f"SpinSystem.H0Extra[{k}]: op is not Hermitian "
+                             f"(tolerance {_H0EXTRA_HERM_TOL:g} relative).")
+        out.append((c, O))
+    return out
+
+
+def _reject_h0extra(sys, where: str) -> None:
+    """Raise if *sys* carries ``H0Extra`` and *where* cannot include it."""
+    if getattr(sys, 'H0Extra', None) is not None:
+        raise ValueError(
+            f"{where} builds the spin Hamiltonian from the interaction tensors "
+            f"without torchspin.ham() and cannot include SpinSystem.H0Extra. Use a "
+            f"solver that diagonalizes the full Hamiltonian (e.g. pepper with "
+            f"Options(Method='matrix')), or remove H0Extra.")
 
 
 # ---------------------------------------------------------------------------

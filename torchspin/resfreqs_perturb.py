@@ -73,6 +73,8 @@ def resfreqs_perturb(
     if opt is None:
         opt = Options()
 
+    from torchspin.spinsystem import _reject_h0extra
+    _reject_h0extra(sys, 'resfreqs_perturb (perturbation theory)')
     if sys.nElectrons != 1:
         raise ValueError(
             f"resfreqs_perturb: nElectrons must be 1, got {sys.nElectrons}."
@@ -81,6 +83,8 @@ def resfreqs_perturb(
     device = sys.g.device
     dt = torch.float64
 
+    from torchspin.experiment import require_positive_field
+    require_positive_field(exp)          # perturbation theory needs a field
     B0_T = float(exp.Field) * 1e-3  # mT → T
 
     # --- g tensor (3×3) in molecular frame --------------------------------

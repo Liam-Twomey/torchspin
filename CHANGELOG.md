@@ -30,6 +30,33 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   mixtures in `Nucs` and `SpinSystem.n > 1`. Not an EasySpin feature. The
   default (`None`) is unchanged.
 
+## [0.7.1] — 2026-11-10
+
+### Added
+
+- **Opt-in field-quadratic and field-cubic higher-order Zeeman terms in the
+  resonance search: `Options.QuadraticZeeman` (default `False`, unchanged
+  behavior).** With `True`, the `Sys.Ham` terms of order lB = 2 and 3 enter
+  pepper's matrix solver, so that H(B) = H0 − B n·μ + B² n·G2·n + B³ G3[n,n,n]
+  equals `ham(Sys, B·n)` at every field. The Hermite level model, Hellmann–Feynman
+  slopes, companion-matrix roots, Newton polish, the dB/dE intensity factor and
+  the strain widths all use dH/dB = −n·μ + 2B n·G2·n + 3B² G3[n,n,n]; the
+  transition pre-selection diagonalizes the full H at the center field, and
+  frequency sweeps add the terms at the fixed field. Covers `pepper` and
+  `pepper_autograd` (`Method='matrix'`: powders, crystals, O3, field and
+  frequency sweeps; the implicit-function gradient uses the full slope) and
+  `resfreqs_matrix`; `levels` gets the same switch as the keyword
+  `quadratic_zeeman=False`. `resfields_batch`/`resfreqs_batch` take the
+  operators as `zeeman_ho=` (from the new
+  `torchspin.ham_ezho.field_nonlinear_zeeman_ops`). The perturbation and hybrid
+  methods, `resfields`, `garlic` and `salt` raise `NotImplementedError` when the
+  option is on and such terms are present; lB ≥ 4 terms raise. Validated
+  against `ham(Sys, B)` (levels to 1e-12, resonance condition to 1e-9), a closed
+  form for S = 1 with w(μB B·S)², a brute-force field-point powder simulation
+  (cosine 0.999998), finite differences (dB/dE, gradients) and EasySpin pepper
+  (`tests/data/ref_pepper_quadzeeman.mat`, cosine ≥ 0.99999, amplitude within
+  0.4 %). With the default `False`, every result is bit-identical to 0.7.0.
+
 ## [0.7.0] — 2026-11-09
 
 CPU-parallel fitting and data generation. Default behavior (`n_workers=1`,

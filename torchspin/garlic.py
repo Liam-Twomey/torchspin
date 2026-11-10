@@ -190,6 +190,9 @@ def _garlic_single(
     """
     if opt is None:
         opt = Options()
+
+    from torchspin.ham_ezho import check_quadratic_zeeman_unsupported
+    check_quadratic_zeeman_unsupported(sys, opt, 'garlic')
     verbose = opt.Verbosity >= 1
     dt = torch.float64
 

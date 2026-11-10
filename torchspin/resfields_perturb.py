@@ -82,6 +82,8 @@ def resfields_perturb_batch(
     if opt is None:
         opt = Options()
 
+    from torchspin.spinsystem import _reject_h0extra
+    _reject_h0extra(sys, 'resfields_perturb (perturbation theory)')
     if sys.nElectrons != 1:
         raise ValueError(
             f"Perturbation theory requires exactly 1 electron, system has {sys.nElectrons}."
@@ -453,6 +455,8 @@ def resfields_perturb(
         opt = Options()
 
     # Validate system
+    from torchspin.spinsystem import _reject_h0extra
+    _reject_h0extra(sys, 'resfields_perturb (perturbation theory)')
     if sys.nElectrons != 1:
         raise ValueError(
             f"Perturbation theory requires exactly 1 electron, system has {sys.nElectrons}."

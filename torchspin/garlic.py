@@ -742,6 +742,9 @@ def _validate_system(sys: SpinSystem):
     if getattr(sys, 'Ham', None):
         raise ValueError("garlic does not support Sys.Ham* parameters!")
 
+    from torchspin.spinsystem import _reject_h0extra
+    _reject_h0extra(sys, 'garlic')
+
 
 def _isotropic_g(sys: SpinSystem) -> torch.Tensor:
     """Isotropic g: mean of principal values (or of the eigenvalues of a full matrix); 0-d tensor."""

@@ -254,6 +254,43 @@ terms are included as H(B) = H0 − B n·μ + B² n·G2·n + B³ G3[n,n,n], whic
   tensor, so a pure B²·identity term cannot be written (`Ham200` is ignored by
   `ham_ezho`, as in EasySpin). This does not change transition energies.
 
+## Simulator — extra field-independent operators (`Sys.H0Extra`) (0.7.2)
+
+`SpinSystem.H0Extra = [(coeff, op), ...]` adds Σ coeff·op (MHz) to H0 inside `ham`.
+It is not an EasySpin field, so there is no EasySpin reference: the tests check that a
+zero-field splitting or a hyperfine S·A·I written as an operator reproduces the native
+term (levels, resonance fields, pepper spectra), and that a U term matches a hand-built
+Hamiltonian.
+
+- **Only `ham`-based solvers.** Solvers that assemble the Hamiltonian from the
+  interaction tensors raise `ValueError` when `H0Extra` is set: pepper with
+  `Method='perturb*'` or `'hybrid'` (for a component with nuclei), `pepper_autograd`
+  with `'perturb*'`, `resfields_perturb`, `resfreqs_perturb`, `endorfrq_perturb`,
+  `orisel`, `salt` for one electron spin (its EPR and ENDOR steps use perturbation
+  theory), garlic, chili, fastmotion, cardamom, saffron's fast (ideal-pulse) algorithm,
+  and `nucspinrmv`/`nucspinkeep`/`nucspinadd` (the operator lives on the full spin
+  space and cannot be reduced or extended).
+- **No isotopologue expansion.** Isotope mixtures in `Nucs` (`'Cu'`, `'(63,65)Cu'`) and
+  sets of equivalent nuclei (`n > 1`) are rejected when the spin system is built: the
+  expansion changes the nuclei, so one operator cannot fit every isotopologue. Give
+  explicit isotopes and build one component per isotopologue, scaling the operator
+  yourself if it involves the nucleus.
+- **Heuristics ignore it.** pepper's automatic field range, the rule that drops pure
+  nuclear transitions in the transition pre-selection (it reads `Sys.A`), and the
+  strain widths (`HStrain`, `gStrain`, `AStrain`, `DStrain` act on the native tensors
+  only) do not see `H0Extra`. Give `Exp.Range` explicitly when the extra term moves the
+  lines.
+- **Symmetry.** `hamsymm` always uses the eigenvalue probe for these systems (never the
+  O3 shortcut or the geometric analysis). The probe only tests the candidate frames of
+  the native tensors (molecular frame, gFrame, DFrame, AFrame, ...), so a term whose
+  symmetry axes lie elsewhere is classified in a lower group (down to Ci). This is safe
+  but can cost grid points; pass `Opt.GridSymmetry` to override.
+- **Units and basis.** `op` must be in the full spin-system basis in `sop` order
+  (electrons, nuclei, then orbital momenta); `coeff * op` is in MHz. The operator is
+  checked for shape and Hermiticity (1e-10 relative), and `coeff` must be real.
+- **Gradients.** Reverse mode works through `levels`, `ham` and `pepper_autograd`; forward
+  mode (dual numbers) works through `ham`/`levels`, not through pepper (known issue).
+
 ## Pepper — absolute intensity (fixed 2026-09-01)
 
 Until 2026-09-01 `pepper()` multiplied the spectrum by one of four empirical
@@ -343,6 +380,35 @@ Since 2026-09-06 the fixed-field path is differentiable (torch interpolation /
 projection / convolution shared with `pepper_autograd`; gradients vs finite
 differences 1e-6–1e-8 for g, A, Q, lw, `test_salt_autograd.py`); the field-swept
 (multi-field) mode is not and raises for grad tensors.
+
+## ENDOR — hyperfine enhancement (`Options.Enhancement`, 0.7.3)
+
+`Options.Enhancement=True` (default `False`, as in EasySpin) makes the rf operator of
+`endorfrq` and of `salt`'s matrix paths the total moment (electron + nuclear,
+`ham()`'s `mux/muy/muz`) perpendicular to the field, chi-averaged over lab x and y.
+Agreement with EasySpin `endorfrq`/`salt` (`Opt.Enhancement='on'`) is 1e-13 of the
+strongest line per level pair (endorfrq) and cosine > 0.99995 (salt).
+
+- **Selection.** As in EasySpin, `threshold` / `Opt.Threshold` selects on the nuclear-only
+  rates and electronic level pairs are excluded. "Electronic" is decided by EasySpin's
+  rule: energy-sorted levels grouped into blocks of prod(2I+1) and only pairs in the same
+  block kept. This is right when the electron Zeeman (or zero-field) splitting exceeds
+  all nuclear splittings. Near level crossings or at very low field the block assignment,
+  and with it the line list, can be wrong.
+- **Moment operator.** torchspin uses `ham()`'s moments. These also contain orbital
+  Zeeman (`Sys.L`) and linear higher-order Zeeman (`Sys.Ham1xx`) terms. EasySpin uses
+  `ham_ez + ham_nz` only. The two agree for ordinary spin systems. There is no
+  `Opt.Nuclei` subset: all nuclei contribute.
+- **Perturbation theory.** `endorfrq_perturb(..., opt=Options(Enhancement=True))` raises.
+  EasySpin skips enhancement there with a log message. `salt` normally picks first-order
+  perturbation theory by itself for one electron without Q. With `Enhancement=True` it
+  uses the matrix path instead, which is slower (one eigh per orientation).
+- **Intensity scale.** For those one-electron, no-Q systems, the default first-order path
+  uses unit line intensities, while the matrix path uses |⟨i|μ|j⟩|² in (MHz/mT)². So
+  switching `Enhancement` on changes the overall scale by orders of magnitude in addition
+  to the enhancement. Normalize before you compare the two. Systems with Q, or more than
+  one electron, are on the matrix path either way, and their on/off ratio matches
+  EasySpin to 1e-3.
 
 ## Garlic — what is and is not ported
 

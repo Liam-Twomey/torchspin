@@ -1346,6 +1346,10 @@ def _pepper_single(
                 f"nuclei: list its copies separately in Nucs, or leave it perturbational."
             )
         if _perturb_idx:
+            if getattr(sys, 'H0Extra', None) is not None:
+                raise ValueError("Options.Method='hybrid' removes the perturbational nuclei "
+                                 "from the Hamiltonian, so it cannot include SpinSystem.H0Extra "
+                                 "(an operator on the full spin space); use Method='matrix'.")
             ham_sys = nucspinrmv(sys, _perturb_idx)
             hybrid_info = {
                 'full_sys': sys,

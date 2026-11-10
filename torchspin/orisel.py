@@ -99,6 +99,8 @@ def orisel(sys, exp, opt: Optional[OriselOptions] = None):
     """
     if opt is None:
         opt = OriselOptions()
+    from torchspin.spinsystem import _reject_h0extra
+    _reject_h0extra(sys, 'orisel (perturbation theory)')
 
     from torchspin.sphgrid import sphgrid
     from torchspin.hamsymm import hamsymm

@@ -67,3 +67,19 @@ def test_simulate_batch_workers():
     x1, Y1 = simulate_batch('pepper', TEMPLATE, EXP, OPT, SPEC, P)
     x2, Y2 = simulate_batch('pepper', TEMPLATE, EXP, OPT, SPEC, P, workers=2)
     assert torch.allclose(Y1, Y2) and torch.allclose(torch.as_tensor(x1), torch.as_tensor(x2))
+
+
+def test_simulate_batch_reuses_its_worker_pool():
+    """A data-generation loop starts the worker processes once, not on every call."""
+    import importlib
+    E = importlib.import_module('torchspin.esfit')
+    gen = torch.Generator().manual_seed(11)
+    P = SPEC.sample(4, gen)
+    _, Y1 = simulate_batch('pepper', TEMPLATE, EXP, OPT, SPEC, P, workers=2)
+    pool = E._POOL[2]
+    pids = {p.pid for p in pool._pool}
+    _, Y2 = simulate_batch('pepper', TEMPLATE, EXP, OPT, SPEC, P, workers=2)
+    assert E._POOL[2] is pool and {p.pid for p in pool._pool} == pids
+    assert torch.equal(Y1, Y2)
+    _, Y3 = simulate_batch('pepper', TEMPLATE, EXP, OPT, SPEC, P, workers='auto')
+    assert torch.allclose(Y1, Y3)

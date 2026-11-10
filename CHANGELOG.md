@@ -18,6 +18,13 @@ Work toward v1.0 performance on branch `dev/v1-acceleration`; see
 
 ### Added
 
+- **`torchspin.ml.simulate_batch` reuses its worker pool.** It used to start
+  and stop a pool of spawned processes on every call. Each worker imports
+  torch, so for typical batch sizes the start-up cost outweighed the parallel
+  speedup (8 workers ran slower than one process). It now uses the pool that
+  esfit caches, started on the first call, and sends rows in chunks. Cu(II),
+  8 workers on a laptop: 31 → 249 spectra/s (one process: 55). `workers='auto'`
+  sizes the pool by the allocated cores and the available memory.
 - **Parallel finite differences in esfit.** With `FitOptions(n_workers > 1)`
   (or `'auto'`), the independent finite-difference probes now run in the worker
   pool: levmar's initial Jacobian (n + 1 calls), every trf Jacobian and

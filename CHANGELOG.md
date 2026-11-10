@@ -6,6 +6,30 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.7.6] — 2026-11-10
+
+### Added
+
+- **`Experiment.Orientations` / `Experiment.OrientationWeights`: pepper on a
+  user-supplied list of field directions.** `Orientations` is an `(N, 2)`
+  array (or tensor) of `[phi, theta]` in radians in the molecular frame, B0
+  along `(sinθ cosφ, sinθ sinφ, cosθ)` as in `levels`/`resfields`;
+  `OrientationWeights` (default `1/N`) are fractions of the sphere, used as
+  given, so weights summing to 1 give the powder amplitude. pepper sums the
+  stick spectra of these orientations with χ-averaged (powder) transition
+  rates, without grid interpolation or SOPHE projection: every line is
+  accumulated with an exact template (strain width or `Sys.lw(1)` Gaussian,
+  else `Sys.lw(2)` Lorentzian) and the rest of `Sys.lw` is convolved, as on the
+  crystal and isotropic paths. Supported: field and frequency sweeps,
+  `Method='matrix'`/`'perturb*'`/`'hybrid'`, strains, temperature,
+  `Sys.initState`, photoselection, `ModAmp`, `Opt.separate='orientations'`.
+  `pepper_autograd` supports it for field sweeps (gradients w.r.t. the spin
+  system, `lw`, strains and the weights). Raises with `Ordering`,
+  `SampleFrame`, `SampleRotation`, `MolFrame`, `CrystalSymmetry`, `Opt.Sites`
+  and `Opt.separate='transitions'/'sites'`; `GridSize`/`GridSymmetry` are
+  ignored. EasySpin has no counterpart; validated against EasySpin crystal
+  spectra summed over two rotations about B0 (an exact χ average). The
+  default (`None`) is unchanged.
 ## [0.7.5] — 2026-11-10
 
 ### Added

@@ -82,6 +82,27 @@ class Experiment:
         selection in fixed-field experiments (e.g. ENDOR via ``salt``).
         ``None`` (default) = no orientation selection.
 
+    Orientations:
+        pepper only. ``None`` (default) = powder average on the SOPHE grid.
+        Otherwise an ``(N, 2)`` array-like (or tensor) of field directions
+        ``[phi, theta]`` (radians) in the molecular frame: the static field
+        B0 points along ``(sinθ cosφ, sinθ sinφ, cosθ)``, the convention of
+        ``levels(sys, phi, theta, B)`` and ``resfields``.  A single ``[phi,
+        theta]`` pair is accepted as ``N = 1``.  pepper then sums the stick
+        spectra of these orientations, each with the χ-averaged (B1 ⊥ B0,
+        averaged about B0) transition rates of a powder, without grid
+        interpolation or SOPHE projection.  Cannot be combined with
+        ``Ordering``, ``SampleFrame``, ``SampleRotation``, ``MolFrame`` or
+        ``CrystalSymmetry``; ``Options.GridSize``/``GridSymmetry`` are ignored.
+    OrientationWeights:
+        pepper only; requires ``Orientations``.  ``(N,)`` non-negative weights,
+        used as given (not renormalized): each is the fraction of the full
+        sphere that orientation stands for, so weights summing to 1 give the
+        amplitude of pepper's powder spectrum (a solid-angle quadrature of the
+        sphere divided by 4π reproduces the powder).  ``None`` (default) =
+        equal weights ``1/N``.  May be a tensor that requires grad
+        (``pepper_autograd``).
+
     Fixed-field mode (ENDOR)
     ------------------------
     Set ``Field`` only (``Range`` and ``mwRange`` both ``None``).  Used by
@@ -110,6 +131,8 @@ class Experiment:
     Field: Optional[float] = None
     mwRange: Optional[list] = None
     ExciteWidth: Optional[float] = None
+    Orientations: Optional[object] = None        # (N, 2) [phi, theta] (rad), molecular frame; pepper only
+    OrientationWeights: Optional[object] = None  # (N,) weights, fraction of the sphere (default 1/N); pepper only
 
     @property
     def is_freq_swept(self) -> bool:
@@ -173,6 +196,44 @@ class Experiment:
             raise ValueError("Harmonic must be 0, 1, or 2.")
         if self.nPoints < 2:
             raise ValueError("nPoints must be at least 2.")
+        if self.Orientations is not None or self.OrientationWeights is not None:
+            self._check_orientations()
+
+    def _check_orientations(self) -> None:
+        """Validate Exp.Orientations / Exp.OrientationWeights (shapes, finite,
+        non-negative weights).  Tensors are kept as given (on the graph); other
+        array-likes become float arrays.  Idempotent (dataclasses.replace)."""
+        import numpy as _np
+        import torch as _torch
+
+        def _arr(v):
+            return v if _torch.is_tensor(v) else _np.asarray(v, dtype=float)
+
+        def _np_of(v):
+            return v.detach().cpu().numpy().astype(float) if _torch.is_tensor(v) else v
+
+        if self.Orientations is None:
+            raise ValueError("Experiment.OrientationWeights requires Experiment.Orientations.")
+        ori = _arr(self.Orientations)
+        if ori.ndim == 1 and ori.shape[0] == 2:
+            ori = ori.reshape(1, 2)
+        if ori.ndim != 2 or ori.shape[1] != 2 or ori.shape[0] < 1:
+            raise ValueError("Experiment.Orientations must be an (N, 2) array of [phi, theta] "
+                             f"in radians; got shape {tuple(ori.shape)}.")
+        if not _np.all(_np.isfinite(_np_of(ori))):
+            raise ValueError("Experiment.Orientations must be finite.")
+        self.Orientations = ori
+        if self.OrientationWeights is not None:
+            w = _arr(self.OrientationWeights)
+            w = w.reshape(-1)
+            if w.shape[0] != ori.shape[0]:
+                raise ValueError(f"Experiment.OrientationWeights has {w.shape[0]} entries but "
+                                 f"Experiment.Orientations has {ori.shape[0]} orientations.")
+            wn = _np_of(w)
+            if not _np.all(_np.isfinite(wn)) or _np.any(wn < 0) or not _np.any(wn > 0):
+                raise ValueError("Experiment.OrientationWeights must be finite, non-negative, "
+                                 "and not all zero.")
+            self.OrientationWeights = w
 
 
 def require_positive_field(exp, opt=None) -> bool:

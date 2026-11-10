@@ -146,6 +146,38 @@ on a finer grid and reports what changed — the only trustworthy test, and the
 one used to produce the table above.  The two `cupc_grid19_4N_*` cases are kept in the validation suite as
 the record of this.
 
+## Simulator — user-supplied orientations in pepper (0.7.6)
+
+`Experiment.Orientations` (`(N, 2)` `[phi, theta]`, molecular frame) and
+`Experiment.OrientationWeights` (fractions of the sphere, default `1/N`, not renormalized)
+make pepper sum stick spectra over the given field directions with χ-averaged rates.
+
+- **No EasySpin counterpart.** EasySpin's orientation lists are crystal orientations
+  (`Exp.SampleFrame`), whose rates have B1 along lab x. The validation emulates the χ
+  average with two crystal sample rotations about B0 (`SampleRotation={'z',[0 pi/2]}`);
+  agreement 1e-4 (Gaussian templates) to 2e-3 (Lorentzian templates, whose tails
+  EasySpin's finite template truncates).
+- **No interpolation, no projection.** The spectrum is a plain weighted sum; a quadrature
+  must be fine enough for the line width (a 20000-point Fibonacci sphere reproduces the
+  1 mT-broadened powder of a rhombic nitroxide to 1e-4 of the maximum).
+- **Half-bin offset against the powder.** pepper's powder projection (like EasySpin's
+  `projectzones`/`projecttriangles`) puts bin k on [x_k, x_k + dx); the template paths
+  (crystal, isotropic, Orientations; EasySpin `lisum1i`) centre it on x_k. A full-sphere
+  quadrature therefore differs from the powder spectrum by a shift of dx/2 — 3 % of the
+  maximum for an axial S = 1/2 with 1 mT lines at 1024 points over 50 mT, in EasySpin as
+  in torchspin. Compare with the powder on the axis shifted by −dx/2.
+- **Strain.** The powder strain branch (EasySpin's facet summation with Λ smoothing) is
+  an approximation; a fine quadrature with per-line strain widths differs from it by
+  ~0.7 % of the maximum.
+- **Window edges.** Only resonances inside the sweep window are found (as for
+  crystals), so a line just outside does not contribute its tail.
+- **Raises** with `Exp.Ordering`, `SampleFrame`, `SampleRotation`, `MolFrame`,
+  `CrystalSymmetry`, `Opt.Sites` and `Opt.separate='transitions'`/`'sites'`.
+  `Opt.GridSize`/`GridSymmetry` are ignored without a warning. Only pepper and
+  pepper_autograd read these fields; garlic, salt and the other simulators ignore them.
+- **pepper_autograd**: field sweeps only (no frequency sweeps, photoselection,
+  `initState`, `mwPhase`, hybrid, `Opt.separate`, as for its powder path). Gradients
+  w.r.t. the orientation angles flow through the resonance search but are not tested.
 ## Simulator — transition selection, `Options.Transitions` (0.7.5)
 
 `Options.Transitions` (EasySpin `Opt.Transitions`) replaces pepper's automatic

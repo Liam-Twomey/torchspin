@@ -91,6 +91,23 @@ export OMP_WAIT_POLICY=PASSIVE
 
 Any explicit value, including `ACTIVE`, silences the warning.
 
+### Training sets of large spin systems
+
+Generating many spectra of a large spin system (for example Cu(II) with two ¹⁴N, 72×72
+matrices) is dominated by eigendecompositions: one per orientation and field step, plus
+one per transition at its resonance field. Two settings decide the cost.
+
+- Random parameter ranges that make g or A rhombic need the full octant of orientations
+  (55 at `GridSize=10`) instead of the 10 of an axial system.
+- `Options.Threshold` (default 1e-4, as in EasySpin) keeps every transition down to
+  10⁻⁴ of the strongest. With non-equivalent anisotropic nuclei that is hundreds of weak
+  forbidden transitions per orientation. For Cu(II) with two ¹⁴N, `Threshold=1e-2` was
+  3.6× faster and changed the spectrum by 0.4 % (normalized RMS), far below the noise
+  a training set is meant to tolerate. Keep the default when fitting measured spectra.
+
+GPUs do not help here: matrices larger than 32×32 are diagonalized on the CPU. Run
+`torchspin.ml.simulate_batch(..., workers='auto')` on CPU nodes instead.
+
 ## Pulse simulations (spidyan, saffron real pulses)
 
 ### Integration step

@@ -248,6 +248,12 @@ def simulate_batch(simulator, template: SpinSystem, exp, opt, spec: ParamSpec, p
     count (and by esfit), so a data-generation loop pays the start-up cost once.
     ``'auto'`` sizes it by the allocated cores and the available memory, as in
     :class:`torchspin.esfit.FitOptions`.
+
+    For training sets of large spin systems, raise ``opt.Threshold`` (default
+    1e-4, as in EasySpin). Rhombic g with non-equivalent nuclei keeps hundreds of
+    weak forbidden transitions per orientation, each costing an eigendecomposition.
+    For Cu(II) with two 14N, ``Threshold=1e-2`` was 3.6x faster and changed the
+    spectrum by 0.4 % (normalized RMS).
     """
     params = torch.as_tensor(params, dtype=_F64)
     if params.ndim == 1:

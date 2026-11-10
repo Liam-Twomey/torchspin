@@ -285,6 +285,11 @@ def salt(
     """
     if sys.nNuclei == 0:
         raise ValueError("salt: spin system must contain at least one nucleus.")
+    # salt treats single-electron systems without quadrupole coupling by
+    # perturbation theory (EPR fields and ENDOR), built from the tensors.
+    if (getattr(sys, 'H0Extra', None) is not None and sys.nElectrons == 1):
+        from torchspin.spinsystem import _reject_h0extra
+        _reject_h0extra(sys, 'salt (single-electron perturbation path)')
 
     if opt is None:
         opt = Options()

@@ -203,6 +203,43 @@ terms are included as H(B) = H0 − B n·μ + B² n·G2·n + B³ G3[n,n,n], whic
   tensor, so a pure B²·identity term cannot be written (`Ham200` is ignored by
   `ham_ezho`, as in EasySpin). This does not change transition energies.
 
+## Simulator — extra field-independent operators (`Sys.H0Extra`) (0.7.2)
+
+`SpinSystem.H0Extra = [(coeff, op), ...]` adds Σ coeff·op (MHz) to H0 inside `ham`.
+It is not an EasySpin field, so there is no EasySpin reference: the tests check that a
+zero-field splitting or a hyperfine S·A·I written as an operator reproduces the native
+term (levels, resonance fields, pepper spectra), and that a U term matches a hand-built
+Hamiltonian.
+
+- **Only `ham`-based solvers.** Solvers that assemble the Hamiltonian from the
+  interaction tensors raise `ValueError` when `H0Extra` is set: pepper with
+  `Method='perturb*'` or `'hybrid'` (for a component with nuclei), `pepper_autograd`
+  with `'perturb*'`, `resfields_perturb`, `resfreqs_perturb`, `endorfrq_perturb`,
+  `orisel`, `salt` for one electron spin (its EPR and ENDOR steps use perturbation
+  theory), garlic, chili, fastmotion, cardamom, saffron's fast (ideal-pulse) algorithm,
+  and `nucspinrmv`/`nucspinkeep`/`nucspinadd` (the operator lives on the full spin
+  space and cannot be reduced or extended).
+- **No isotopologue expansion.** Isotope mixtures in `Nucs` (`'Cu'`, `'(63,65)Cu'`) and
+  sets of equivalent nuclei (`n > 1`) are rejected when the spin system is built: the
+  expansion changes the nuclei, so one operator cannot fit every isotopologue. Give
+  explicit isotopes and build one component per isotopologue, scaling the operator
+  yourself if it involves the nucleus.
+- **Heuristics ignore it.** pepper's automatic field range, the rule that drops pure
+  nuclear transitions in the transition pre-selection (it reads `Sys.A`), and the
+  strain widths (`HStrain`, `gStrain`, `AStrain`, `DStrain` act on the native tensors
+  only) do not see `H0Extra`. Give `Exp.Range` explicitly when the extra term moves the
+  lines.
+- **Symmetry.** `hamsymm` always uses the eigenvalue probe for these systems (never the
+  O3 shortcut or the geometric analysis). The probe only tests the candidate frames of
+  the native tensors (molecular frame, gFrame, DFrame, AFrame, ...), so a term whose
+  symmetry axes lie elsewhere is classified in a lower group (down to Ci). This is safe
+  but can cost grid points; pass `Opt.GridSymmetry` to override.
+- **Units and basis.** `op` must be in the full spin-system basis in `sop` order
+  (electrons, nuclei, then orbital momenta); `coeff * op` is in MHz. The operator is
+  checked for shape and Hermiticity (1e-10 relative), and `coeff` must be real.
+- **Gradients.** Reverse mode works through `levels`, `ham` and `pepper_autograd`; forward
+  mode (dual numbers) works through `ham`/`levels`, not through pepper (known issue).
+
 ## Pepper — absolute intensity (fixed 2026-09-01)
 
 Until 2026-09-01 `pepper()` multiplied the spectrum by one of four empirical

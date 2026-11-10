@@ -81,6 +81,8 @@ def fastmotion_t(sys, field_mT, tcorr, domain: str = "field") -> Tuple[torch.Ten
     ``(nLines,)`` tensor (mT for ``domain='field'``, MHz for ``'freq'``) and the
     mI combinations as a NumPy array (constants).
     """
+    from torchspin.spinsystem import _reject_h0extra
+    _reject_h0extra(sys, 'fastmotion')
     if domain not in ("field", "freq"):
         raise ValueError(f"domain must be 'field' or 'freq', got {domain!r}")
     dt = torch.float64

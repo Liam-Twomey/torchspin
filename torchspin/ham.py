@@ -93,6 +93,20 @@ def ham(
         H0 = H0 + ham_cf(sys, dtype=dtype, device=device)
         H0 = H0 + ham_so(sys, dtype=dtype, device=device)
 
+    # Generic extra field-independent terms (SpinSystem.H0Extra): sum coeff*op,
+    # kept on the autograd graph in coeff and op. In H0, so both the (H0, mu)
+    # and the ham(sys, B0) path include them.
+    if getattr(sys, 'H0Extra', None) is not None:
+        for coeff, op in sys.H0Extra:
+            if dtype.is_complex:
+                op_ = op.to(dtype=dtype, device=device)
+            else:
+                if bool(torch.any(op.detach().imag != 0)):
+                    raise ValueError('ham: SpinSystem.H0Extra has a complex operator; '
+                                     'use a complex dtype.')
+                op_ = op.real.to(dtype=dtype, device=device)
+            H0 = H0 + coeff.to(device) * op_
+
     # Electron magnetic-dipole-moment operators (negative prefactor baked in)
     mux, muy, muz = ham_ez(sys, B0=None, dtype=dtype, device=device)
 
@@ -115,9 +129,15 @@ def ham(
         muy = muy + muy_oz
         muz = muz + muz_oz
 
-    # Higher-order Zeeman terms (Sys.Ham*): EasySpin ham.m adds the zero-field
-    # part to H0 and the linear-in-B part to the moment operators; at a given
-    # field the complete ham_ezho(Sys,B0) is added instead.
+    # Higher-order Zeeman terms (Sys.Ham*): the zero-field part goes into H0 and
+    # the linear-in-B part into the moment operators; at a given field the
+    # complete ham_ezho(Sys,B0) is added instead. ham_ezho's G1 is dH/dB, and
+    # H = H0 - mu.B, so the linear part enters the moments as -G1. EasySpin's
+    # ham.m adds +G1, which flips the sign of these terms relative to
+    # ham(Sys,B0) and to every other Zeeman term; torchspin deliberately does
+    # not follow it (KNOWN_LIMITATIONS.md, "Higher-order Zeeman terms").
+    # Quadratic and cubic terms (G2, G3) are not representable as H0 - mu.B and
+    # are included only by ham(Sys, B0).
     ho_zeeman = sys.Ham is not None and any(
         bool(torch.any(v != 0)) for v in sys.Ham.values()
     )
@@ -127,9 +147,9 @@ def ham(
             from torchspin.ham_ezho import ham_ezho
             G0, G1, _, _ = ham_ezho(sys, B0=None, dtype=dtype, device=device)
             H0 = H0 + G0
-            mux = mux + G1[0]
-            muy = muy + G1[1]
-            muz = muz + G1[2]
+            mux = mux - G1[0]
+            muy = muy - G1[1]
+            muz = muz - G1[2]
         return H0, mux, muy, muz
 
     # Full Hamiltonian

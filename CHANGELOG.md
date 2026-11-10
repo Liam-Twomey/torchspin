@@ -6,6 +6,262 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.7.6] — 2026-11-10
+
+### Added
+
+- **`Experiment.Orientations` / `Experiment.OrientationWeights`: pepper on a
+  user-supplied list of field directions.** `Orientations` is an `(N, 2)`
+  array (or tensor) of `[phi, theta]` in radians in the molecular frame, B0
+  along `(sinθ cosφ, sinθ sinφ, cosθ)` as in `levels`/`resfields`;
+  `OrientationWeights` (default `1/N`) are fractions of the sphere, used as
+  given, so weights summing to 1 give the powder amplitude. pepper sums the
+  stick spectra of these orientations with χ-averaged (powder) transition
+  rates, without grid interpolation or SOPHE projection: every line is
+  accumulated with an exact template (strain width or `Sys.lw(1)` Gaussian,
+  else `Sys.lw(2)` Lorentzian) and the rest of `Sys.lw` is convolved, as on the
+  crystal and isotropic paths. Supported: field and frequency sweeps,
+  `Method='matrix'`/`'perturb*'`/`'hybrid'`, strains, temperature,
+  `Sys.initState`, photoselection, `ModAmp`, `Opt.separate='orientations'`.
+  `pepper_autograd` supports it for field sweeps (gradients w.r.t. the spin
+  system, `lw`, strains and the weights). Raises with `Ordering`,
+  `SampleFrame`, `SampleRotation`, `MolFrame`, `CrystalSymmetry`, `Opt.Sites`
+  and `Opt.separate='transitions'/'sites'`; `GridSize`/`GridSymmetry` are
+  ignored. EasySpin has no counterpart; validated against EasySpin crystal
+  spectra summed over two rotations about B0 (an exact χ average). The
+  default (`None`) is unchanged.
+## [0.7.5] — 2026-11-10
+
+### Added
+
+- **`Options.Transitions` selects the transitions `pepper` simulates, like
+  EasySpin's `Opt.Transitions`.** `None` (the default) keeps the automatic
+  transition pre-selection with `Opt.Threshold`, so default spectra are
+  unchanged (bit-identical). `'all'` takes every level pair u < v with neither
+  the pre-selection nor the `Threshold` intensity post-selection (EasySpin sets
+  its post-selection threshold to zero for `'all'`), which recovers weak lines
+  that the default drops, such as the half-field ΔmS = 2 line of a triplet with
+  small D. A list of 1-based level pairs `(u, v)`, levels numbered by ascending
+  energy at the resonance field, takes exactly those transitions: pairs are
+  normalized to u < v, duplicates are removed, and out-of-range indices, u = v,
+  non-integers and empty lists raise `ValueError` (EasySpin silently drops
+  out-of-range rows and keeps duplicates). Within a list the `Threshold`
+  post-selection still applies, as in EasySpin. Supported on every matrix path
+  of `pepper` (powder projection, strain summation, interpolation, crystals,
+  the isotropic O3 path, frequency sweeps including the automatic range, and
+  `Method='hybrid'`, where levels are those of the exact core) and in
+  `pepper_autograd` (gradients flow as before; the pair list is a constant).
+  `Method='perturb*'` raises when `Transitions` is set (EasySpin ignores the
+  option there). Validated against EasySpin on 9 cases
+  (`tests/data/ref_pepper_transitions.mat`).
+## [0.7.4] — 2026-11-10
+
+### Added
+
+- **Zero-field frequency sweeps and fixed-field ENDOR: `Options.ZeroField`**
+  (default `False`, which leaves results unchanged). With `ZeroField=True`,
+  `pepper` frequency sweeps and `salt` fixed-field ENDOR accept
+  `Experiment.Field = 0`. Levels are grouped into degenerate clusters (Kramers
+  doublets, accidental degeneracies), and each transition carries the rate
+  summed over all level pairs between two clusters. Intensities are therefore
+  independent of the arbitrary eigenbasis inside a degenerate subspace. The
+  summing is done before slot tracking, threshold pruning and pair
+  preselection. The isotropic O3 shortcut is replaced by a D2h grid. Validated
+  against EasySpin's pepper at `Exp.Field = 0` (5 cases,
+  `ref_pepper_zerofield.mat`), closed forms (S = 1: D−E, D+E, 2E; S = 3/2:
+  2·sqrt(D²+3E²)) and the B → 0 limit. See KNOWN_LIMITATIONS.md,
+  "Pepper and salt — zero field".
+- `Experiment(Field=0)` now constructs in frequency-swept and fixed-field mode.
+  Without `ZeroField`, the same `ValueError("Experiment.Field must be positive
+  (mT).")` is raised when `pepper`, `salt`, `garlic`, `chili` or
+  `resfreqs_perturb` is called. A negative field still raises in the
+  constructor.
+## [0.7.3] — 2026-11-10
+
+### Added
+
+- **Hyperfine enhancement in ENDOR intensities: `Options.Enhancement`**
+  (EasySpin `Opt.Enhancement`). Default `False`: results are unchanged
+  (bit-identical). With `True`, `endorfrq` (new keyword `opt=Options(...)`)
+  and the matrix paths of `salt` use the total magnetic moment (electron +
+  nuclear, the `mux/muy/muz` of `ham()`) perpendicular to the field,
+  chi-averaged over lab x and y, as the rf transition operator. As in EasySpin
+  `endorfrq.m`, the transition selection (`threshold`/`Opt.Threshold`) still uses
+  the nuclear-only rates and electronic level pairs are excluded. `salt` with
+  `Enhancement=True` always uses the matrix ENDOR path; its automatic
+  first-order perturbation shortcut (one electron, no Q) has no enhancement.
+  `endorfrq_perturb` gained an `opt` keyword and raises `NotImplementedError`
+  for `Enhancement=True` (EasySpin silently ignores it there). Validated
+  against EasySpin `endorfrq`/`salt` with `Opt.Enhancement='on'`
+  (`tests/data/endor_enhancement_refs.mat`), a NumPy brute force, the
+  first-order factor (ν_ENDOR/ν_I)² and gradients (reverse and forward mode).
+## [0.7.2] — 2026-11-10
+
+### Added
+
+- **`SpinSystem.H0Extra`: generic extra terms in the field-independent
+  Hamiltonian.** A list of `(coeff, op)` pairs; `ham` adds Σ coeff·op (MHz) to
+  H0 on both the `(H0, μ)` and the `ham(Sys, B0)` path, so every simulator that
+  diagonalizes the full Hamiltonian (pepper's matrix method and
+  `pepper_autograd`, `levels`, `resfields`, `resfreqs`, `endorfrq`, `curry`,
+  `nucfrq2d`, saffron's real-pulse engine, spidyan) includes it. `coeff` is a
+  real scalar (float or 0-d tensor) and stays on the autograd graph, as does
+  `op` when it is a tensor that requires grad; `op` is an (n, n) Hermitian
+  matrix in the full spin-system basis (sop order). This allows terms that
+  torchspin has no field for, such as the S=3/2 U term U Σ C_k(S) I_k. Shape,
+  Hermiticity and real coefficients are checked when the spin system is built.
+  `hamsymm` analyzes systems with `H0Extra` through the eigenvalue probe, and
+  `pepper` routes to `pepper_autograd` when a coefficient or operator requires
+  grad. Solvers that build the Hamiltonian from the tensors without `ham`
+  (perturbation theory, `Method='hybrid'`, garlic, chili, fastmotion, cardamom,
+  saffron's fast algorithm, salt for one electron, orisel,
+  `nucspinrmv`/`nucspinkeep`/`nucspinadd`) raise when it is set; so do isotope
+  mixtures in `Nucs` and `SpinSystem.n > 1`. Not an EasySpin feature. The
+  default (`None`) is unchanged.
+
+## [0.7.1] — 2026-11-10
+
+### Added
+
+- **Opt-in field-quadratic and field-cubic higher-order Zeeman terms in the
+  resonance search: `Options.QuadraticZeeman` (default `False`, unchanged
+  behavior).** With `True`, the `Sys.Ham` terms of order lB = 2 and 3 enter
+  pepper's matrix solver, so that H(B) = H0 − B n·μ + B² n·G2·n + B³ G3[n,n,n]
+  equals `ham(Sys, B·n)` at every field. The Hermite level model, Hellmann–Feynman
+  slopes, companion-matrix roots, Newton polish, the dB/dE intensity factor and
+  the strain widths all use dH/dB = −n·μ + 2B n·G2·n + 3B² G3[n,n,n]; the
+  transition pre-selection diagonalizes the full H at the center field, and
+  frequency sweeps add the terms at the fixed field. Covers `pepper` and
+  `pepper_autograd` (`Method='matrix'`: powders, crystals, O3, field and
+  frequency sweeps; the implicit-function gradient uses the full slope) and
+  `resfreqs_matrix`; `levels` gets the same switch as the keyword
+  `quadratic_zeeman=False`. `resfields_batch`/`resfreqs_batch` take the
+  operators as `zeeman_ho=` (from the new
+  `torchspin.ham_ezho.field_nonlinear_zeeman_ops`). The perturbation and hybrid
+  methods, `resfields`, `garlic` and `salt` raise `NotImplementedError` when the
+  option is on and such terms are present; lB ≥ 4 terms raise. Validated
+  against `ham(Sys, B)` (levels to 1e-12, resonance condition to 1e-9), a closed
+  form for S = 1 with w(μB B·S)², a brute-force field-point powder simulation
+  (cosine 0.999998), finite differences (dB/dE, gradients) and EasySpin pepper
+  (`tests/data/ref_pepper_quadzeeman.mat`, cosine ≥ 0.99999, amplitude within
+  0.4 %). With the default `False`, every result is bit-identical to 0.7.0.
+
+## [0.7.0] — 2026-11-09
+
+CPU-parallel fitting and data generation. Default behavior (`n_workers=1`,
+`simulate_batch(workers=0)`) is unchanged; no physics code changed.
+
+### Changed — behavior differs from 0.6.7
+
+- **`FitOptions.n_workers` now also applies to levmar, trf, lbfgsb and the
+  uncertainty estimate of every method**, not only to the population methods.
+  A script that already set `n_workers='auto'` (or an integer > 1) for one of
+  these methods used to get no parallelism; it now starts spawned worker
+  processes, which needs the usual `if __name__ == '__main__':` guard around
+  the code that runs the fit.
+
+### Added
+
+- **Parallel finite differences in esfit.** With `FitOptions(n_workers > 1)`
+  or `'auto'`, the independent finite-difference probes run in the worker pool:
+  levmar's initial Jacobian (n + 1 calls), every trf Jacobian and L-BFGS-B
+  gradient (n calls each, through SciPy's `workers=`, SciPy ≥ 1.16; older SciPy
+  runs them sequentially with a warning) and the uncertainty Jacobian (2n
+  calls). Probe points, recording order and evaluation counts are unchanged, so
+  a model with deterministic output gives the same fit. For trf and lbfgsb,
+  SciPy evaluates the base point in the main process and the probes in workers
+  with fewer threads; torch round-off then differs at ~1e-14, which shows up as
+  a ~1e-6 relative Jacobian difference, far below what changes a fit. Measured
+  on a 224-core cluster node (4-parameter pepper fit, 8–64 threads): levmar
+  1.6–1.7×, trf 2.6–3.2× faster. The uncertainty Jacobian no longer evaluates
+  an unused base point.
+- **`FitOptions.devices`**, e.g. `['cuda:0', 'cuda:1']`: process workers are
+  pinned to these GPUs round-robin (`CUDA_VISIBLE_DEVICES` per worker), so a
+  model with `device='cuda'` runs on its own GPU.
+- **`torchspin.ml.simulate_batch` reuses its worker pool** (shared with esfit)
+  instead of starting one per call, sends rows in chunks, and accepts
+  `workers='auto'`. Cu(II) on a 64-core node: 197 → 1473 spectra/s with 64
+  workers (one process: 42; one A100 GPU: 76). An interrupted batch terminates
+  the pool.
+- **`torchspin.parallel`** (public): `cpu_budget()` (CPU affinity, then SLURM,
+  then the machine), `inner_threads()`, the `thread_budget(n)` context manager
+  (caps torchspin's inner pools, and BLAS with `blas=True` when `threadpoolctl`
+  is installed) and `native_thread_env(n)` for spawned workers (also passes
+  `OMP_WAIT_POLICY=PASSIVE`).
+- Optional extra `[hpc]` (`threadpoolctl`, `cloudpickle`).
+- Docs: `docs/pitfalls.md`, "Training sets of large spin systems" (orientation
+  symmetry and `Options.Threshold`: for Cu(II) with two ¹⁴N, `Threshold=1e-2`
+  was 3.6× faster with a 0.4 % spectrum change).
+- Benchmarks:
+  - end-to-end esfit workloads (levmar and trf, sequential and with process
+    workers; swarm with process and thread backends; a nested-parallelism case);
+  - `benchmarks/workloads/ml_throughput.py` (spectra per second of
+    `simulate_batch`);
+  - `benchmarks/analysis/compare_baseline.py`, which saves host-free baselines
+    and flags regressions;
+  - a generic SLURM job-array template, `benchmarks/cluster/slurm_array_template.sbatch`;
+  - `run_workloads.py --save-outputs`;
+  - `docs/v1_acceleration/`: the acceleration review and roadmap with the
+    measurement log.
+
+### Fixed
+
+- `benchmarks/workloads/run_workloads.py`:
+  - `--threads N` now overwrites the native thread variables. With an
+    inherited `OMP_NUM_THREADS` (as batch scripts set it), "1-thread" runs used
+    to keep every core in the native pools.
+  - It also caps Apple Accelerate (`VECLIB_MAXIMUM_THREADS`).
+  - `--procs` starts its process pool once, outside the timed replicates.
+  - A failing workload is recorded instead of aborting the run.
+  - It imports torchspin before torch and records `OMP_WAIT_POLICY`.
+
+### Removed
+
+- `benchmarks/cluster/slurm_cpu.sh` and `slurm_gpu.sh`, replaced by the
+  array template. The CPU script's thread sweep was mislabeled (see Fixed).
+
+## [0.6.7] — 2026-11-09
+
+### Fixed
+
+- **Linear higher-order Zeeman terms (`Sys.Ham1xx`) had opposite signs in
+  `ham(Sys)` and `ham(Sys, B0)`** (all public releases, 0.3.0–0.6.6). The moment operators of `ham(Sys)` carried
+  +dH/dB, but torchspin's convention is H = H0 − μ·B, so the field-free
+  decomposition (used by pepper's resonance search, `levels`, `endorfrq`,
+  `salt`, `curry`, `nucfrq2d`) had these terms with the opposite sign to
+  `ham(Sys, B0)` and to the nuclear Zeeman interaction. Without nuclei this
+  does not change spectra (time reversal); with nuclei it changed ENDOR and
+  nuclear frequencies and forbidden-transition intensities. EasySpin's
+  `ham.m` has the same inconsistency; torchspin now deliberately deviates
+  from it (see KNOWN_LIMITATIONS.md, "Higher-order Zeeman terms").
+- `hamsymm` added the higher-order Zeeman Hamiltonian twice when probing for
+  symmetry (`ham(Sys, B0)` already includes it).
+- `SpinSystem(g=[2.0])` (a one-element list, which EasySpin treats like
+  `g=2`) crashed `ham` with an IndexError; it now means isotropic g, like a
+  scalar.
+
+## [0.6.6] — 2026-11-09
+
+### Fixed
+
+- **Every cm⁻¹ conversion in `unitconvert` was off by a factor of 100**
+  (in every public release, 0.3.0–0.6.5). `CLIGHT` is stored in cm/s, but the
+  conversions multiplied it by 100 again, as if it were in m/s:
+  `unitconvert(1, 'cm^-1->MHz')` returned 2 997 924.58 instead of
+  29 979.2458, and 1 cm⁻¹ came out as 143.9 K instead of 1.4388 K. This
+  affected all eight `cm^-1` conversions (to and from MHz, mT, K and eV) and
+  the energy axis of `levelsplot(..., Units='cm^-1')`, which was 100× too
+  small. The old test built its expected value with the same factor; the new
+  tests compare against exact SI values (1 cm⁻¹ = 29 979.2458 MHz =
+  1.438 776 877 K = 1.239 841 984 × 10⁻⁴ eV).
+- **`curry` docstring: wrong SI-to-CGS factor for the susceptibility.** It
+  said 1 m³/mol = 10⁶ cm³/mol; the correct relation is 1 cm³/mol (CGS) =
+  4π × 10⁻⁶ m³/mol, so SI values are converted to cm³/mol by multiplying by
+  10⁶/(4π). The values `curry` returns (SI) were always correct. The two
+  magnetometry examples used the wrong factor too, so they printed CGS values
+  4π too large (a Curie constant of 4.71 instead of 0.375 cm³·K/mol for
+  S = 1/2, g = 2); a new test checks χT = 0.375 cm³·K/mol.
+
 ## [0.6.5] — 2026-11-09
 
 ### Fixed

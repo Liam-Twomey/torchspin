@@ -670,6 +670,8 @@ def saffron(
         return saffron_thyme(sys, exp, opt)
 
     # --- Fast (ideal-pulse) algorithm from here on ---
+    from torchspin.spinsystem import _reject_h0extra
+    _reject_h0extra(sys, "saffron's fast (ideal-pulse) algorithm")
     # EasySpin saffron.m:303 rejects the spidyan-only detection fields
     # (predefined sequences with real pulses were rejected above, saffron.m:351).
     for _f in ('DetSequence', 'DetOperator'):

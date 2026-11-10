@@ -114,6 +114,8 @@ def garlic(
     component.  See :func:`_garlic_single` for the line engine.
     """
     opt_ = opt if opt is not None else Options()
+    from torchspin.experiment import require_positive_field
+    require_positive_field(exp)          # Field = 0 is a pepper/salt-only option
     from torchspin.isotopologues import expand_components
     components = expand_components(sys_or_list, getattr(opt_, 'IsoCutoff', 1e-4))
     freq_sweep = exp.is_freq_swept or (exp.Field is not None and exp.mwFreq is None)
@@ -190,6 +192,9 @@ def _garlic_single(
     """
     if opt is None:
         opt = Options()
+
+    from torchspin.ham_ezho import check_quadratic_zeeman_unsupported
+    check_quadratic_zeeman_unsupported(sys, opt, 'garlic')
     verbose = opt.Verbosity >= 1
     dt = torch.float64
 
@@ -741,6 +746,9 @@ def _validate_system(sys: SpinSystem):
 
     if getattr(sys, 'Ham', None):
         raise ValueError("garlic does not support Sys.Ham* parameters!")
+
+    from torchspin.spinsystem import _reject_h0extra
+    _reject_h0extra(sys, 'garlic')
 
 
 def _isotropic_g(sys: SpinSystem) -> torch.Tensor:

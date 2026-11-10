@@ -5,7 +5,7 @@ Mirrors EasySpin's ``Exp`` and ``Opt`` structs for CW EPR powder simulation.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 
 
 @dataclass
@@ -69,6 +69,11 @@ class Experiment:
           triplets, S=1 systems).
     Field:
         Fixed static field in mT (frequency-swept mode).  ``None`` = field-swept.
+        Must be positive; ``Field = 0`` (zero-field frequency sweeps and
+        fixed-field ENDOR) is accepted by :func:`pepper` and :func:`salt` only
+        with ``Options(ZeroField=True)``.  Every other simulator, and pepper/salt
+        without that option, raise the usual "must be positive" error when they
+        are called.
     mwRange:
         Microwave frequency sweep range ``[nu_lo, nu_hi]`` in GHz
         (frequency-swept mode).  ``None`` = field-swept.
@@ -76,6 +81,27 @@ class Experiment:
         Microwave excitation bandwidth (FWHM, MHz) for orientation
         selection in fixed-field experiments (e.g. ENDOR via ``salt``).
         ``None`` (default) = no orientation selection.
+
+    Orientations:
+        pepper only. ``None`` (default) = powder average on the SOPHE grid.
+        Otherwise an ``(N, 2)`` array-like (or tensor) of field directions
+        ``[phi, theta]`` (radians) in the molecular frame: the static field
+        B0 points along ``(sinθ cosφ, sinθ sinφ, cosθ)``, the convention of
+        ``levels(sys, phi, theta, B)`` and ``resfields``.  A single ``[phi,
+        theta]`` pair is accepted as ``N = 1``.  pepper then sums the stick
+        spectra of these orientations, each with the χ-averaged (B1 ⊥ B0,
+        averaged about B0) transition rates of a powder, without grid
+        interpolation or SOPHE projection.  Cannot be combined with
+        ``Ordering``, ``SampleFrame``, ``SampleRotation``, ``MolFrame`` or
+        ``CrystalSymmetry``; ``Options.GridSize``/``GridSymmetry`` are ignored.
+    OrientationWeights:
+        pepper only; requires ``Orientations``.  ``(N,)`` non-negative weights,
+        used as given (not renormalized): each is the fraction of the full
+        sphere that orientation stands for, so weights summing to 1 give the
+        amplitude of pepper's powder spectrum (a solid-angle quadrature of the
+        sphere divided by 4π reproduces the powder).  ``None`` (default) =
+        equal weights ``1/N``.  May be a tensor that requires grad
+        (``pepper_autograd``).
 
     Fixed-field mode (ENDOR)
     ------------------------
@@ -105,6 +131,8 @@ class Experiment:
     Field: Optional[float] = None
     mwRange: Optional[list] = None
     ExciteWidth: Optional[float] = None
+    Orientations: Optional[object] = None        # (N, 2) [phi, theta] (rad), molecular frame; pepper only
+    OrientationWeights: Optional[object] = None  # (N,) weights, fraction of the sphere (default 1/N); pepper only
 
     @property
     def is_freq_swept(self) -> bool:
@@ -143,11 +171,13 @@ class Experiment:
                 raise ValueError("Experiment.mwRange must be [nu_lo, nu_hi] in GHz.")
             if self.mwRange[0] >= self.mwRange[1]:
                 raise ValueError("Experiment.mwRange[1] must be larger than mwRange[0].")
-            if self.Field <= 0:
+            # Field = 0 is held back until a simulator sees the Options
+            # (Options.ZeroField, see require_positive_field).
+            if self.Field < 0:
                 raise ValueError("Experiment.Field must be positive (mT).")
         elif self.is_fixed_field:
             # Fixed-field mode validation (ENDOR)
-            if self.Field <= 0:
+            if self.Field < 0:
                 raise ValueError("Experiment.Field must be positive (mT).")
         else:
             # Field-swept mode validation.  Range may be omitted (automatic sweep
@@ -166,6 +196,64 @@ class Experiment:
             raise ValueError("Harmonic must be 0, 1, or 2.")
         if self.nPoints < 2:
             raise ValueError("nPoints must be at least 2.")
+        if self.Orientations is not None or self.OrientationWeights is not None:
+            self._check_orientations()
+
+    def _check_orientations(self) -> None:
+        """Validate Exp.Orientations / Exp.OrientationWeights (shapes, finite,
+        non-negative weights).  Tensors are kept as given (on the graph); other
+        array-likes become float arrays.  Idempotent (dataclasses.replace)."""
+        import numpy as _np
+        import torch as _torch
+
+        def _arr(v):
+            return v if _torch.is_tensor(v) else _np.asarray(v, dtype=float)
+
+        def _np_of(v):
+            return v.detach().cpu().numpy().astype(float) if _torch.is_tensor(v) else v
+
+        if self.Orientations is None:
+            raise ValueError("Experiment.OrientationWeights requires Experiment.Orientations.")
+        ori = _arr(self.Orientations)
+        if ori.ndim == 1 and ori.shape[0] == 2:
+            ori = ori.reshape(1, 2)
+        if ori.ndim != 2 or ori.shape[1] != 2 or ori.shape[0] < 1:
+            raise ValueError("Experiment.Orientations must be an (N, 2) array of [phi, theta] "
+                             f"in radians; got shape {tuple(ori.shape)}.")
+        if not _np.all(_np.isfinite(_np_of(ori))):
+            raise ValueError("Experiment.Orientations must be finite.")
+        self.Orientations = ori
+        if self.OrientationWeights is not None:
+            w = _arr(self.OrientationWeights)
+            w = w.reshape(-1)
+            if w.shape[0] != ori.shape[0]:
+                raise ValueError(f"Experiment.OrientationWeights has {w.shape[0]} entries but "
+                                 f"Experiment.Orientations has {ori.shape[0]} orientations.")
+            wn = _np_of(w)
+            if not _np.all(_np.isfinite(wn)) or _np.any(wn < 0) or not _np.any(wn > 0):
+                raise ValueError("Experiment.OrientationWeights must be finite, non-negative, "
+                                 "and not all zero.")
+            self.OrientationWeights = w
+
+
+def require_positive_field(exp, opt=None) -> bool:
+    """Reject ``Experiment.Field = 0`` unless ``opt.ZeroField`` allows it.
+
+    :class:`Experiment` cannot see the Options, so it accepts ``Field = 0`` in
+    frequency-swept and fixed-field mode and every simulator that reads
+    ``exp.Field`` calls this first: without ``Options(ZeroField=True)`` it raises
+    the same ``ValueError`` that Experiment raises for a negative field.  Returns
+    True when the experiment is a permitted zero-field one.
+    """
+    if exp is None or getattr(exp, 'Field', None) is None:
+        return False
+    if not (exp.is_freq_swept or exp.is_fixed_field):
+        return False
+    if float(exp.Field) > 0:
+        return False
+    if float(exp.Field) == 0 and bool(getattr(opt, 'ZeroField', False)):
+        return True
+    raise ValueError("Experiment.Field must be positive (mT).")
 
 
 VALID_METHODS = frozenset({
@@ -208,7 +296,8 @@ class Options:
 
         :func:`salt` ignores ``Method``: it always finds resonance fields by
         diagonalization and the ENDOR frequencies by first-order perturbation
-        theory.
+        theory for one electron without quadrupole couplings, and by matrix
+        diagonalization otherwise or when ``Enhancement=True``.
     HybridCoreNuclei:
         ``Method='hybrid'`` only.  1-based indices into ``Sys.Nucs`` of the
         nuclei to keep in the exactly diagonalized core; all electron spins are
@@ -263,6 +352,18 @@ class Options:
     Threshold:
         Relative intensity cutoff for transitions.  Transitions with
         intensity below ``Threshold * max_intensity`` are discarded.
+    Transitions:
+        :func:`pepper` / :func:`~torchspin.pepper_autograd.pepper_autograd`
+        only (EasySpin ``Opt.Transitions``).  ``None`` (default): automatic
+        transition pre-selection with ``Threshold``.  ``'all'``: every level
+        pair ``u < v``, with neither pre-selection nor the ``Threshold``
+        intensity post-selection.  A list of 1-based level pairs ``(u, v)``
+        (levels numbered by ascending energy at the resonance field, as in
+        EasySpin): exactly those transitions; pairs are normalized to ``u < v``
+        and duplicates removed; the ``Threshold`` post-selection still applies
+        within the list, as in EasySpin.  With ``Method='hybrid'`` the levels
+        are those of the exactly treated core.  Not available with
+        ``Method='perturb*'`` (raises).
     Verbosity:
         Output verbosity: 0 = silent, 1 = progress, 2 = detailed.
     BatchSize:
@@ -270,6 +371,40 @@ class Options:
         = automatic: all orientations at once, capped so that the batched
         Hamiltonians (orientations × field knots × dim²) stay below ~400 MB.
         Set to 1 for sequential processing (debugging/low-memory systems).
+    Enhancement:
+        :func:`~torchspin.endorfrq.endorfrq` and :func:`~torchspin.salt.salt`
+        only (EasySpin ``Opt.Enhancement``).  ``False`` (default, as in
+        EasySpin): the rf transition operator is the nuclear magnetic moment
+        only.  ``True``: it is the total magnetic moment (electron + nuclear,
+        the moment operators of :func:`~torchspin.ham.ham`), projected on the
+        same rf directions, which includes hyperfine enhancement.  Transition
+        selection (``Threshold``) still uses the nuclear-only rates, and
+        electronic (EPR) level pairs are excluded, as in EasySpin.  ``salt``
+        then always uses the matrix ENDOR path (its automatic first-order
+        perturbation shortcut has no enhancement); ``endorfrq_perturb``
+        raises.
+    ZeroField:
+        :func:`pepper` frequency sweeps and :func:`salt` fixed-field ENDOR only.
+        ``False`` (default): ``Experiment.Field`` must be positive.  ``True``:
+        ``Experiment.Field = 0`` is allowed (zero-field EPR/FDMR, zero-field
+        ENDOR).  The levels are then grouped into degenerate clusters (relative
+        tolerance 1e-9 of the level spread) and every transition between two
+        clusters carries the rate summed over all its level pairs, so that the
+        intensities do not depend on the arbitrary eigenbasis inside a
+        degenerate (e.g. Kramers) subspace.  The isotropic O3 shortcut is
+        replaced by a D2h grid.  See KNOWN_LIMITATIONS.md.
+    QuadraticZeeman:
+        Include the field-quadratic and field-cubic higher-order Zeeman terms of
+        ``Sys.Ham`` (orders lB = 2 and 3) in the resonance search, so that
+        H(B) = H0 − B n·μ + B² n·G2·n + B³ G3[n,n,n] equals ``ham(Sys, B·n)``.
+        Default ``False``: these terms are dropped, as before (H = H0 − B n·μ).
+        Supported by :func:`pepper` and :func:`pepper_autograd` with
+        ``Method='matrix'`` (field and frequency sweeps, powders and crystals)
+        and by :func:`resfreqs_matrix`; the perturbation and hybrid methods,
+        :func:`resfields`, :func:`garlic` and :func:`salt` raise
+        ``NotImplementedError`` when the option is on and such terms are present.
+        Transition moments stay those of the linear moment operators μ, as in
+        EasySpin; the field-to-frequency factor dB/dE uses the full slope.
     """
 
     Method: str = 'matrix'
@@ -289,6 +424,10 @@ class Options:
     Stretch: float = 0.25             # automatic sweep range padding factor (EasySpin garlic Opt.Stretch)
     ModellingAccuracy: float = 2e-6   # resonance search: segment-model accuracy relative to mwFreq (EasySpin Opt.ModellingAccuracy)
     device: str = 'cpu'
+    QuadraticZeeman: bool = False     # include lB = 2, 3 Sys.Ham terms in the resonance search (default: dropped)
+    Enhancement: bool = False         # ENDOR hyperfine enhancement (EasySpin Opt.Enhancement), endorfrq/salt matrix paths
+    ZeroField: bool = False           # allow Experiment.Field = 0 (pepper frequency sweeps, salt fixed field)
+    Transitions: Union[str, List[Tuple[int, int]], None] = None   # EasySpin Opt.Transitions: None, 'all' or 1-based (u, v) pairs
 
     @property
     def grid_size_coarse(self) -> int:

@@ -21,7 +21,7 @@ equals pepper's to rounding, and the harmonic/line shape are EasySpin's.
 Supported: field sweeps, ``Opt.Method='matrix'`` and ``'perturb*'`` (pepper's
 perturbation route: single electron, no strain), every grid symmetry, ``GridSize`` int or ``[N, Ninterp]``,
 ``Harmonic`` 0-2, global ``lw``/``lwpp`` (Gaussian and/or Lorentzian, tensors
-allowed), ``Temperature``, strains.  Strains (HStrain, gStrain, AStrain on the graph; DStrain magnitudes are
+allowed), ``Temperature``, strains, ``Opt.Transitions`` (matrix route only).  Strains (HStrain, gStrain, AStrain on the graph; DStrain magnitudes are
 constants) use the summation branch.  ``ModAmp`` (pseudo-modulation, torch).  Not yet: ``mwPhase``, ordering,
 photoselection, crystals, frequency sweeps (these raise ``NotImplementedError``).
 """
@@ -451,6 +451,8 @@ def gaussian_bins_t(x: torch.Tensor, pos: torch.Tensor, fwhm: torch.Tensor, amp:
 def _check_supported(sys: SpinSystem, exp: Experiment, opt: Options) -> None:
     def _nz(t):
         return t is not None and bool(torch.any(torch.as_tensor(t) != 0))
+    if getattr(exp, 'Orientations', None) is not None:
+        _pep._check_user_orientations(exp, opt)     # same ValueErrors as pepper
     if getattr(exp, 'Range', None) is None or getattr(exp, 'mwFreq', None) is None:
         raise NotImplementedError('pepper_autograd: field sweeps only (Experiment.mwFreq and Range).')
     if getattr(exp, 'Field', None) is not None and getattr(exp, 'mwRange', None) is not None:
@@ -522,6 +524,10 @@ def _pepper_autograd_single(sys: SpinSystem, exp: Experiment, opt: Options) -> t
     H0, mux, muy, muz = ham(sys)
     H0, mux, muy, muz = H0.to(device), mux.to(device), muy.to(device), muz.to(device)
 
+    user_ori = _pep._user_orientations(exp)
+    if user_ori is not None:
+        return _orientations_single(sys, exp, opt, x, dx, H0, mux, muy, muz, user_ori)
+
     # Grid symmetry and knots (discrete; detached)
     grid_sym = opt.GridSymmetry
     R_sym2mol = torch.eye(3, dtype=_F64)
@@ -550,6 +556,26 @@ def _pepper_autograd_single(sys: SpinSystem, exp: Experiment, opt: Options) -> t
     use_perturb = (str(opt.Method).startswith('perturb') and sys.nElectrons == 1
                    and not strain_present and not needs_exact_boltz)
     all_B, all_I, all_P, all_Wl = [None] * n_orient, [None] * n_orient, [None] * n_orient, [None] * n_orient
+    # Options.QuadraticZeeman: lB = 2, 3 Sys.Ham terms in the matrix search (the
+    # implicit-function gradient at the Newton step then uses the full slope).
+    zho = None
+    if bool(getattr(opt, 'QuadraticZeeman', False)):
+        from torchspin.ham_ezho import field_nonlinear_zeeman_ops, has_field_nonlinear_zeeman
+        if has_field_nonlinear_zeeman(sys):
+            if str(opt.Method).startswith('perturb'):
+                raise NotImplementedError(
+                    f"pepper_autograd: Options.Method='{opt.Method}' does not support "
+                    f"Options.QuadraticZeeman=True with field-quadratic/cubic Sys.Ham terms; "
+                    f"use Method='matrix'.")
+            zho = tuple(None if g is None else g.to(device) for g in field_nonlinear_zeeman_ops(sys))
+    # Opt.Transitions (as in pepper): user level pairs replace the pre-selection;
+    # 'all' also switches the intensity post-selection off
+    user_tr = getattr(opt, 'Transitions', None)
+    if user_tr is not None and str(opt.Method).startswith('perturb'):
+        raise ValueError("Options.Transitions cannot be used with perturbation theory "
+                         f"(Options.Method='{opt.Method}'); use Method='matrix'.")
+    user_pairs, trans_all = _pep._user_transitions(user_tr, H0.shape[0]) if user_tr is not None else (None, False)
+    post_thr = 0.0 if trans_all else float(opt.Threshold)
     if use_perturb:
         from torchspin.resfields_perturb import resfields_perturb_batch
         _w = B_hi - B_lo
@@ -558,24 +584,29 @@ def _pepper_autograd_single(sys: SpinSystem, exp: Experiment, opt: Options) -> t
         for j in range(n_orient):
             all_B[j], all_I[j] = B_list[j], I_list[j]          # index-matched slots, no level pairs
     else:
-        with torch.no_grad():
-            pairs = _pep._preselect_pairs(H0.detach().cpu(), mux.detach().cpu(), muy.detach().cpu(), muz.detach().cpu(),
-                                          sys, exp, opt, 0.5 * (B_lo + B_hi))
+        if user_pairs is not None:
+            pairs = user_pairs
+        else:
+            with torch.no_grad():
+                pairs = _pep._preselect_pairs(H0.detach().cpu(), mux.detach().cpu(), muy.detach().cpu(), muz.detach().cpu(),
+                                              sys, exp, opt, 0.5 * (B_lo + B_hi),
+                                              zeeman_ho=None if zho is None else tuple(None if g is None else g.cpu() for g in zho))
         opt_rf = _dc_replace(opt, Threshold=0.0)
         batch = auto_batch_size(opt.BatchSize, H0.shape[0], n_orient)
         for s in range(0, n_orient, batch):
             e = min(s + batch, n_orient)
             B_list, I_list, W_list, P_list = resfields_batch(H0, mux, muy, muz, phi_arr[s:e], theta_arr[s:e], exp, opt_rf,
-                                                             sys=sys, return_pairs=True, pairs=pairs)
+                                                             sys=sys, return_pairs=True, pairs=pairs,
+                                                             **({'zeeman_ho': zho} if zho is not None else {}))
             for j in range(e - s):
                 all_B[s + j], all_I[s + j], all_P[s + j], all_Wl[s + j] = B_list[j], I_list[j], P_list[j], W_list[j]
     if all(b is None or b.numel() == 0 for b in all_B):
         return x, torch.zeros(nPoints, dtype=_F64)
     has_strain = any(w is not None and w.numel() > 0 for w in all_Wl)
     if has_strain:
-        B_c, I_c, W_c = _slots_t(all_B, all_I, all_P, n_orient, float(opt.Threshold), all_W=all_Wl)
+        B_c, I_c, W_c = _slots_t(all_B, all_I, all_P, n_orient, post_thr, all_W=all_Wl)
     else:
-        B_c, I_c = _slots_t(all_B, all_I, all_P, n_orient, float(opt.Threshold))
+        B_c, I_c = _slots_t(all_B, all_I, all_P, n_orient, post_thr)
         W_c = None
     if opt.Verbosity >= 1:
         print(f'pepper_autograd: {n_orient} orientations, {B_c.shape[0]} transition slots, grid {grid_sym}')
@@ -648,4 +679,111 @@ def _pepper_autograd_single(sys: SpinSystem, exp: Experiment, opt: Options) -> t
     if use_mod:
         from torchspin.dataproc import fieldmod_t
         spec = fieldmod_t(x, spec, mod_amp, int(exp.Harmonic))   # pseudo-modulation (Exp.ModAmp)
+    return x, spec.cpu() if spec.device.type != 'cpu' else spec
+
+
+def _lorentzian_bins_t(x: torch.Tensor, pos: torch.Tensor, fwhm: torch.Tensor, amp: torch.Tensor,
+                       min_fwhm: float, chunk: int = 256) -> torch.Tensor:
+    """Sum of bin-integrated Lorentzians (absorption), torch port of
+    ``pepper._lorentzian_bins`` with phase 0; differentiable in ``pos``,
+    ``fwhm`` and ``amp``."""
+    n = x.shape[0]
+    dev = pos.device
+    out = torch.zeros(n, dtype=_F64, device=dev)
+    if pos.numel() == 0:
+        return out
+    dx = float(x[1] - x[0])
+    xr = x.to(dev)
+    hw = torch.clamp(fwhm, min=min_fwhm) / 2.0
+    for k0 in range(0, pos.numel(), chunk):
+        p = pos[k0:k0 + chunk, None]; g = hw[k0:k0 + chunk, None]; a = amp[k0:k0 + chunk, None]
+        hi = torch.atan((xr[None, :] + 0.5 * dx - p) / g)
+        lo = torch.atan((xr[None, :] - 0.5 * dx - p) / g)
+        out = out + (a * (hi - lo) / math.pi).sum(dim=0)
+    return out
+
+
+def _orientations_single(sys, exp, opt, x, dx, H0, mux, muy, muz, user_ori):
+    """``Exp.Orientations`` on the graph: the stick sum of
+    ``pepper._pepper_single``'s orientation branch — χ-averaged resonances at the
+    given molecular-frame field directions, amplitude I·4π·w, per-line templates
+    (strain width or Sys.lw(1) Gaussian, else Sys.lw(2) Lorentzian), the rest of
+    Sys.lw convolved, harmonic as in pepper.  Differentiable in the spin-system
+    tensors, Sys.lw and the orientation weights."""
+    device = H0.device
+    nPoints = x.shape[0]
+    phi, theta, w = user_ori
+    phi, theta, w = phi.to(device), theta.to(device), w.to(device)
+    n_orient = phi.shape[0]
+
+    def _nz(t):
+        return t is not None and bool(torch.any(torch.as_tensor(t).detach() != 0))
+    strain_present = any(_nz(getattr(sys, k, None)) for k in ('HStrain', 'gStrain', 'AStrain', 'DStrain'))
+    use_perturb = (str(opt.Method).startswith('perturb') and sys.nElectrons == 1 and not strain_present
+                   and not (float(sys.S[0]) > 0.5 and sys.D is not None))
+    Bs, Is, Ws, ks = [], [], [], []
+    if use_perturb:
+        from torchspin.resfields_perturb import resfields_perturb_batch
+        B_lo, B_hi = float(exp.Range[0]), float(exp.Range[1])
+        _w = B_hi - B_lo
+        exp_search = _dc_replace(exp, Range=[max(0.0, B_lo - 0.2 * _w), B_hi + 0.2 * _w], CenterSweep=None)
+        B_list, I_list = resfields_perturb_batch(sys, phi, theta, exp_search, opt,
+                                                 order=_pep.PEPPER_PERTURB_ORDER.get(str(opt.Method), 2),
+                                                 return_full=True)
+        for k in range(n_orient):
+            keep = (torch.isfinite(B_list[k]) & (I_list[k] != 0)).detach()
+            Bs.append(B_list[k][keep]); Is.append(I_list[k][keep])
+            ks.append(torch.full((int(keep.sum()),), k, dtype=torch.long, device=device))
+    else:
+        batch = auto_batch_size(opt.BatchSize, H0.shape[0], n_orient)
+        for s0 in range(0, n_orient, batch):
+            e0 = min(s0 + batch, n_orient)
+            B_list, I_list, W_list = resfields_batch(H0, mux, muy, muz, phi[s0:e0], theta[s0:e0], exp, opt, sys=sys)
+            for j in range(e0 - s0):
+                b = B_list[j]
+                if b is None or b.numel() == 0:
+                    continue
+                Bs.append(b.to(_F64)); Is.append(I_list[j].to(_F64))
+                if W_list[j] is not None and W_list[j].numel() == b.numel():
+                    Ws.append(W_list[j].to(_F64))
+                ks.append(torch.full((b.numel(),), s0 + j, dtype=torch.long, device=device))
+    lw = sys.get_lw()
+    fwhm_g, fwhm_l = lw[0], lw[1]
+    has_strain = strain_present and len(Ws) == len(Bs) and len(Ws) > 0
+    min_fwhm = dx / 100.0
+    if Bs:
+        B_all = torch.cat(Bs); k_all = torch.cat(ks)
+        amp = torch.cat(Is) * (4.0 * math.pi) * w[k_all]
+        if has_strain:
+            spec = gaussian_bins_t(x, B_all, torch.cat(Ws), amp, min_fwhm)
+        elif _pos(fwhm_g):
+            spec = gaussian_bins_t(x, B_all, torch.as_tensor(fwhm_g, dtype=_F64) * torch.ones_like(B_all), amp, min_fwhm)
+        elif _pos(fwhm_l):
+            spec = _lorentzian_bins_t(x, B_all, torch.as_tensor(fwhm_l, dtype=_F64) * torch.ones_like(B_all), amp, min_fwhm)
+        else:
+            spec = gaussian_bins_t(x, B_all, torch.zeros_like(B_all), amp, min_fwhm)
+    else:
+        spec = torch.zeros(nPoints, dtype=_F64, device=device) * w.sum()
+    spec = spec / dx * (2.0 * math.pi)
+    if has_strain:
+        g_rem, l_rem = fwhm_g, fwhm_l
+    elif _pos(fwhm_g):
+        g_rem, l_rem = 0.0, fwhm_l
+    else:
+        g_rem, l_rem = 0.0, 0.0
+    mod_amp = getattr(exp, 'ModAmp', 0.0)
+    use_mod = mod_amp is not None and float(torch.as_tensor(mod_amp).detach()) > 0
+    H = 0 if use_mod else int(exp.Harmonic)
+    if not has_strain and not _pos(fwhm_g) and not _pos(fwhm_l):
+        H = 0          # pepper's auto-harmonic: no broadening at all → stick absorption spectrum
+        if use_mod:
+            raise ValueError("With field modulation (Exp.ModAmp), Exp.Harmonic=0 does not work.")
+    if _pos(g_rem) or _pos(l_rem):
+        spec = convspec_t(spec, dx, g_rem, l_rem, deriv=H)
+    else:
+        for _ in range(H):
+            spec = _pep._central_difference(spec, dx)
+    if use_mod:
+        from torchspin.dataproc import fieldmod_t
+        spec = fieldmod_t(x, spec, mod_amp, int(exp.Harmonic))
     return x, spec.cpu() if spec.device.type != 'cpu' else spec

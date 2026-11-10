@@ -56,12 +56,22 @@ def inputs_require_grad(*objs) -> bool:
             return any(torch.is_tensor(u) and u.requires_grad for u in v)
         return False
 
+    def _rg_deep(v) -> bool:
+        # SpinSystem.H0Extra is a list of (coeff, op) pairs: two levels deep
+        if torch.is_tensor(v):
+            return bool(v.requires_grad)
+        if isinstance(v, (list, tuple)):
+            return any(_rg_deep(u) for u in v)
+        return False
+
     for obj in objs:
         items = obj if isinstance(obj, (list, tuple)) else [obj]
         for it in items:
             if it is None or not dataclasses.is_dataclass(it):
                 continue
             if any(_rg(getattr(it, f.name, None)) for f in dataclasses.fields(it)):
+                return True
+            if _rg_deep(getattr(it, 'H0Extra', None)):
                 return True
     return False
 

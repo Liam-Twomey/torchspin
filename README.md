@@ -98,9 +98,10 @@ print('Best-fit g:', result.pfit)
 `progress='text'` prints RMSD, evaluation count and ETA as it runs, and
 interrupting the kernel returns the best fit so far.
 
-Population methods (swarm, genetic, grid, montecarlo, global) can evaluate each
-generation in parallel worker processes with `FitOptions(n_workers='auto')`. This
-is off by default. Each worker is a separate Python process with its own torch
+With `FitOptions(n_workers='auto')`, model evaluations run in parallel worker
+processes: each generation of the population methods (swarm, genetic, grid,
+montecarlo, global), and the finite-difference probes of each levmar, trf and
+lbfgsb Jacobian (1.5–3× faster for a 4-parameter pepper fit). This is off by default. Each worker is a separate Python process with its own torch
 (about 0.3–0.5 GB), so `'auto'` uses the cores you were allocated, at most 32, and
 no more workers than fit in half the free memory. A script that uses it needs the
 usual `if __name__ == '__main__':` guard around the code that runs the fit.

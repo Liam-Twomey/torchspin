@@ -32,7 +32,8 @@ import os
 import sys
 from pathlib import Path
 
-_THREAD_ENV = ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'NUMEXPR_NUM_THREADS')
+_THREAD_ENV = ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'NUMEXPR_NUM_THREADS',
+               'VECLIB_MAXIMUM_THREADS')
 
 
 def _parse():
@@ -43,8 +44,11 @@ def _parse():
     ap.add_argument('--warmup', type=int, default=0, help='untimed calls before the replicates')
     ap.add_argument('--profile', action='store_true', help='cProfile one extra call per workload')
     ap.add_argument('--threads', type=int, default=0,
-                    help='torch.set_num_threads and (if unset) OMP/MKL/OPENBLAS/NUMEXPR_NUM_THREADS')
+                    help='torch.set_num_threads and OMP/MKL/OPENBLAS/NUMEXPR_NUM_THREADS (overrides the environment)')
     ap.add_argument('--out', default='')
+    ap.add_argument('--save-outputs', default='',
+                    help='write every workload\'s last result (numeric arrays) to this .npz, '
+                         'for cross-host or CPU/CUDA comparison')
     ap.add_argument('--list', action='store_true')
     ap.add_argument('--no-verify', action='store_true',
                     help='skip the CUDA profiler trace and CPU/CUDA consistency check')
@@ -54,10 +58,14 @@ def _parse():
 
 
 def _apply_thread_env(threads: int) -> dict:
-    """Set the native thread-pool variables before numpy/torch import; return them."""
+    """Set the native thread-pool variables before numpy/torch import; return them.
+
+    The variables are overwritten, not defaulted: a batch script that exports
+    OMP_NUM_THREADS for the whole allocation must not turn a "1-thread" run into
+    a run with every core in the native pools."""
     if threads:
         for k in _THREAD_ENV:
-            os.environ.setdefault(k, str(threads))
+            os.environ[k] = str(threads)
     return {k: os.environ.get(k) for k in _THREAD_ENV}
 
 
@@ -69,6 +77,12 @@ def _init_worker(threads, device):
     import torch as _t
     _t.set_num_threads(threads)
     _W['device'] = device
+
+
+def _init_probe(_):
+    # imports torchspin in the worker so the first timed replicate does not pay for it
+    import torchspin  # noqa: F401
+    return 0
 
 
 def _one_fit_call(k):
@@ -254,8 +268,12 @@ def main():
     # prefer the checkout's torchspin over any (possibly stale) site-packages install
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     import cProfile, io, json, platform, pstats, statistics, subprocess, time
+    # torchspin before torch, as the docs recommend: it sets OMP_WAIT_POLICY=PASSIVE
+    # (unless already set) before the OpenMP runtime loads
+    import torchspin  # noqa: F401
     import numpy as np
     import torch
+    thread_env['OMP_WAIT_POLICY'] = os.environ.get('OMP_WAIT_POLICY')
     from workloads import WORKLOADS, WORKLOAD_DEVICES, STOCHASTIC, supports_device
 
     if a.list:
@@ -299,21 +317,35 @@ def main():
         started=time.strftime('%Y-%m-%d %H:%M:%S %Z'),
     )
     results, replicates, stats, audit = {}, {}, {}, {}
+    outputs = {}
     prof_txt = []
+    failed = []
 
     if a.procs:
         import multiprocessing as mp
         ctx = mp.get_context('spawn')
         reps = []
-        for r in range(a.warmup + a.repeat):
-            t0 = time.perf_counter()
-            with ctx.Pool(a.procs, initializer=_init_worker, initargs=(a.threads or 1, a.device)) as pool:
+        # the pool is started once, outside the timed replicates (as esfit caches its
+        # pool); its start-up cost is reported separately
+        t0 = time.perf_counter()
+        pool = ctx.Pool(a.procs, initializer=_init_worker, initargs=(a.threads or 1, a.device))
+        pool.map(_init_probe, range(a.procs))
+        spawn_s = time.perf_counter() - t0
+        try:
+            for r in range(a.warmup + a.repeat):
+                t0 = time.perf_counter()
                 pool.map(_one_fit_call, list(range(20)))
-            if r >= a.warmup:
-                reps.append(time.perf_counter() - t0)
+                if r >= a.warmup:
+                    reps.append(time.perf_counter() - t0)
+        finally:
+            pool.close(); pool.join()
         key = 'pepper_fit_loop_20_procs%d' % a.procs
         results[key] = statistics.median(reps); replicates[key] = reps
-        print(f"pepper_fit_loop_20 with {a.procs} processes x {a.threads or 1} threads: {results[key]:.2f} s (median of {len(reps)})", flush=True)
+        q1, med, q3 = [float(x) for x in np.percentile(reps, [25, 50, 75])]
+        stats[key] = dict(n=len(reps), median=med, q1=q1, q3=q3, iqr=q3 - q1, min=min(reps), max=max(reps),
+                          pool_start_seconds=spawn_s)
+        print(f"pepper_fit_loop_20 with {a.procs} processes x {a.threads or 1} threads: {results[key]:.2f} s "
+              f"(median of {len(reps)}; pool start {spawn_s:.2f} s, not included)", flush=True)
         names = []
 
     for name in names:
@@ -325,56 +357,70 @@ def main():
             audit[name] = entry
             print(f'{name:32s} unsupported on {a.device} (CPU-only implementation) - skipped', flush=True)
             continue
-        fn = WORKLOADS[name](device=a.device)
-        if use_cuda:
-            entry['gpu_before'] = _gpu_snapshot()
-            if not a.no_verify:
-                fn_cpu = WORKLOADS[name](device='cpu')
-                entry.update(_verify_cuda(name, fn, fn_cpu, a.out))
+        try:
+            fn = WORKLOADS[name](device=a.device)
+            if use_cuda:
+                entry['gpu_before'] = _gpu_snapshot()
+                if not a.no_verify:
+                    fn_cpu = WORKLOADS[name](device='cpu')
+                    entry.update(_verify_cuda(name, fn, fn_cpu, a.out))
+                else:
+                    entry['effective_mode'] = 'cuda (unverified)'
             else:
-                entry['effective_mode'] = 'cuda (unverified)'
-        else:
-            entry.update(effective_mode='cpu', cuda_kernels_observed=False)
-        for _ in range(a.warmup):
-            fn()
+                entry.update(effective_mode='cpu', cuda_kernels_observed=False)
+            for _ in range(a.warmup):
+                fn()
+                if use_cuda:
+                    torch.cuda.synchronize()
+            reps = []
+            for _ in range(a.repeat):
+                if use_cuda:
+                    torch.cuda.synchronize()
+                t0 = time.perf_counter()
+                last = fn()
+                if use_cuda:
+                    torch.cuda.synchronize()
+                reps.append(time.perf_counter() - t0)
+            if a.profile:
+                pr = cProfile.Profile(); pr.enable(); fn(); pr.disable()
+                if use_cuda:
+                    torch.cuda.synchronize()
+                s = io.StringIO(); pstats.Stats(pr, stream=s).sort_stats('cumulative').print_stats(25)
+                prof_txt.append(f'=== {name} ===\n' + s.getvalue())
             if use_cuda:
-                torch.cuda.synchronize()
-        reps = []
-        for _ in range(a.repeat):
-            if use_cuda:
-                torch.cuda.synchronize()
-            t0 = time.perf_counter()
-            fn()
-            if use_cuda:
-                torch.cuda.synchronize()
-            reps.append(time.perf_counter() - t0)
-        if a.profile:
-            pr = cProfile.Profile(); pr.enable(); fn(); pr.disable()
-            if use_cuda:
-                torch.cuda.synchronize()
-            s = io.StringIO(); pstats.Stats(pr, stream=s).sort_stats('cumulative').print_stats(25)
-            prof_txt.append(f'=== {name} ===\n' + s.getvalue())
-        if use_cuda:
-            entry['gpu_after'] = _gpu_snapshot()
-        # Use the same linear percentile estimator as the MATLAB results and
-        # the figure generator. With five replicates, the default exclusive
-        # statistics.quantiles estimator can pull a quartile toward an extreme.
-        q1, med, q3 = [float(x) for x in np.percentile(reps, [25, 50, 75])]
-        results[name] = med; replicates[name] = reps
-        stats[name] = dict(n=len(reps), median=med, q1=q1, q3=q3, iqr=q3 - q1, min=min(reps), max=max(reps),
-                           mean=statistics.fmean(reps), stdev=statistics.stdev(reps) if len(reps) > 1 else 0.0)
-        audit[name] = entry
+                entry['gpu_after'] = _gpu_snapshot()
+            # Use the same linear percentile estimator as the MATLAB results and
+            # the figure generator. With five replicates, the default exclusive
+            # statistics.quantiles estimator can pull a quartile toward an extreme.
+            q1, med, q3 = [float(x) for x in np.percentile(reps, [25, 50, 75])]
+            results[name] = med; replicates[name] = reps
+            stats[name] = dict(n=len(reps), median=med, q1=q1, q3=q3, iqr=q3 - q1, min=min(reps), max=max(reps),
+                               mean=statistics.fmean(reps), stdev=statistics.stdev(reps) if len(reps) > 1 else 0.0)
+            audit[name] = entry
+            if a.save_outputs and a.repeat:
+                for k, arr in enumerate(_flatten_outputs(last)):
+                    outputs[f'{name}__{k}'] = arr
+        except Exception as exc:  # one broken workload must not discard the others' timings
+            entry.update(effective_mode='failed', error=f'{type(exc).__name__}: {exc}')
+            audit[name] = entry; failed.append(name)
+            print(f'{name:32s} FAILED  {entry["error"]}', flush=True)
+            continue
         mode = entry['effective_mode']
         print(f'{name:32s} {med:9.3f} s  (median of {len(reps)}, IQR {q1:.3f}-{q3:.3f}, mode={mode})', flush=True)
 
     meta['finished'] = time.strftime('%Y-%m-%d %H:%M:%S %Z')
+    if a.save_outputs and outputs:
+        Path(a.save_outputs).parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(a.save_outputs, **outputs)
     if a.out:
         Path(a.out).parent.mkdir(parents=True, exist_ok=True)
         json.dump(dict(meta=meta, seconds=results, replicates=replicates, stats=stats, audit=audit),
                   open(a.out, 'w'), indent=2, default=str)
         if prof_txt:
             open(a.out + '.profile.txt', 'w').write('\n'.join(prof_txt))
-    return 0
+    if failed:
+        print(f'{len(failed)} workload(s) failed: {", ".join(failed)}', flush=True)
+    return 1 if failed else 0
 
 
 if __name__ == '__main__':

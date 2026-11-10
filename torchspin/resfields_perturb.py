@@ -82,6 +82,12 @@ def resfields_perturb_batch(
     if opt is None:
         opt = Options()
 
+    from torchspin.spinsystem import _reject_h0extra
+    _reject_h0extra(sys, 'resfields_perturb (perturbation theory)')
+
+    from torchspin.ham_ezho import check_quadratic_zeeman_unsupported
+    check_quadratic_zeeman_unsupported(sys, opt, 'resfields_perturb_batch')
+
     if sys.nElectrons != 1:
         raise ValueError(
             f"Perturbation theory requires exactly 1 electron, system has {sys.nElectrons}."
@@ -452,7 +458,12 @@ def resfields_perturb(
     if opt is None:
         opt = Options()
 
+    from torchspin.ham_ezho import check_quadratic_zeeman_unsupported
+    check_quadratic_zeeman_unsupported(sys, opt, 'resfields_perturb')
+
     # Validate system
+    from torchspin.spinsystem import _reject_h0extra
+    _reject_h0extra(sys, 'resfields_perturb (perturbation theory)')
     if sys.nElectrons != 1:
         raise ValueError(
             f"Perturbation theory requires exactly 1 electron, system has {sys.nElectrons}."

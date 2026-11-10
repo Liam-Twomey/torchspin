@@ -57,7 +57,9 @@ fi
 if [[ " $STAGES " == *" cpu "* ]]; then
   snapshot "cpu-start"
   log "stage gpu-consistency tests"
-  $PIN python -m pytest torchspin/tests/test_gpu_consistency.py -q -p no:cacheprovider 2>&1 | tail -2 | tee "$OUT/gpu_consistency.txt"
+  # recorded, not gating: an older checkout under comparison may fail these tests,
+  # and that must not abort the timing stages
+  $PIN python -m pytest torchspin/tests/test_gpu_consistency.py -q -p no:cacheprovider 2>&1 | tail -2 | tee "$OUT/gpu_consistency.txt" || true
   for th in 1 8 32; do
     log "stage cpu threads=$th"
     env OMP_NUM_THREADS=$th MKL_NUM_THREADS=$th OPENBLAS_NUM_THREADS=$th NUMEXPR_NUM_THREADS=$th \

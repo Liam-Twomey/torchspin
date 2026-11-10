@@ -115,10 +115,9 @@ class FitOptions:
         ``interrupted=False``; a stop or interrupt returns the best point so
         far with ``interrupted=True``. ``FitResult.n_iterations`` is SciPy's
         Jacobian-evaluation count (one per trust-region iteration).
-        TRF is a local optimization method, not a CPU-acceleration feature:
-        it runs sequentially in the calling process. Simulation threading
-        (``torch.set_num_threads``) and the population-worker parallelism of
-        ``n_workers`` (population methods only) are separate and unaffected.
+        TRF is a local optimization method: its iterations run one after
+        another, but with ``n_workers > 1`` the finite-difference probes of
+        each Jacobian are evaluated concurrently (SciPy >= 1.16).
     """
     method: str = 'simplex'
     autoscale: str = 'lsq'
@@ -158,17 +157,34 @@ class FitOptions:
     trf_diff_step: Optional[float] = None
     trf_x_scale: Union[str, float, np.ndarray] = 'jac'
     trf_gradient_tol: float = 1e-7
-    # Parallelism for population-based methods (swarm, genetic, montecarlo,
-    # grid, global). n_workers=1 is sequential; an int > 1 or 'auto' evaluates
-    # the population in a spawned process pool with one torch thread per worker.
-    # 'auto' = the cores this process may use (affinity / SLURM aware), at most
-    # 32, and no more than about 0.5 GB per worker within half the available
-    # memory: each worker is a separate Python process with its own torch (workers='auto'|'processes'; 'threads' forces a thread
-    # pool, which gains little because the forward model holds the GIL).
+    # Parallel model evaluations. Population methods (swarm, genetic,
+    # montecarlo, grid, global) evaluate each population concurrently; levmar,
+    # trf, lbfgsb and the uncertainty estimate evaluate the independent
+    # finite-difference probes of each Jacobian or gradient concurrently (trf
+    # and lbfgsb need SciPy >= 1.16; older SciPy runs them sequentially). For
+    # trf and lbfgsb SciPy evaluates the base point in this process and the
+    # probes in the workers, whose thread count differs; torch reductions then
+    # differ at ~1e-14, which SciPy's ~1.5e-8 relative step turns into a
+    # Jacobian error of ~1e-6 of the signal scale (measured on pepper models),
+    # far below what changes a fit. levmar and the uncertainty Jacobian evaluate
+    # the base point and all probes in the workers.
+    # n_workers=1 is sequential; an int > 1 or 'auto' uses a spawned process
+    # pool with the cores split between the workers (workers='auto'|'processes';
+    # 'threads' forces a thread pool, which gains little because the forward
+    # model holds the GIL). 'auto' = the cores this process may use (affinity /
+    # SLURM aware), at most 32, and no more than about 0.5 GB per worker within
+    # half the available memory: each worker is a separate Python process with
+    # its own torch.
     # Models defined in a notebook cell need cloudpickle (pip install
     # cloudpickle) to reach the workers; otherwise a thread pool is used.
     n_workers: Union[int, str] = 1
     workers: str = 'auto'
+    # GPUs for process workers, e.g. ['cuda:0', 'cuda:1']: each spawned worker
+    # is pinned to one of them, round-robin, by setting CUDA_VISIBLE_DEVICES
+    # before CUDA starts in it, so a model that uses device='cuda' runs on its
+    # own GPU. None (default) leaves the workers' GPU visibility unchanged.
+    # Ignored by the thread backend (one process sees one set of devices).
+    devices: Optional[list] = None
     # Seed for numpy RNGs in population-based optimizers. None (default)
     # = non-deterministic (each run produces a different particle/sample
     # realization). An int (e.g. seed=42) makes the fit bit-reproducible
@@ -1158,18 +1174,29 @@ def _optimize_lbfgsb(
     
     lb, ub = bounds
     tracker = _tracker_of(objective_fn)
+    fun = objective_fn
+    opts = {
+        'maxiter': options.max_iter,
+        'ftol': options.tol_fun,
+        'gtol': 1e-5,
+        'disp': options.verbosity > 0
+    }
+    # the n forward-difference probes of each gradient are independent
+    mapper = _scipy_map(options, tracker, _scalar, 2 * len(p0))
+    if mapper is not None:
+        if _scipy_takes_workers('lbfgsb'):
+            raw = objective_fn.raw if isinstance(objective_fn, _TrackedObjective) else objective_fn
+            fun = _ParentRecorded(raw, tracker, _scalar)
+            opts['workers'] = mapper
+        else:
+            warnings.warn("esfit: parallel L-BFGS-B gradients need SciPy >= 1.16; evaluating them sequentially")
     result = minimize(
-        objective_fn,
+        fun,
         p0,
         method='L-BFGS-B',
         bounds=Bounds(lb, ub),
         callback=lambda *a, **k: tracker.iteration(tracker.iter, None),
-        options={
-            'maxiter': options.max_iter,
-            'ftol': options.tol_fun,
-            'gtol': 1e-5,
-            'disp': options.verbosity > 0
-        }
+        options=opts
     )
     return result
 
@@ -1519,10 +1546,29 @@ def _tracker_of(fn) -> _FitProgress:
     return t if t is not None else _FitProgress(FitOptions(), 'none', enabled=False)
 
 
-_POOL = None                # cached spawn pool: (n_proc, threads_per_worker, pool)
+_POOL = None                # cached spawn pool: (n_proc, threads_per_worker, pool, devices)
 
 
-def _pool_init(n_threads: int):
+import contextvars as _contextvars
+# FitOptions.devices of the fit in progress (set by esfit, read when a pool is made)
+_FIT_DEVICES: _contextvars.ContextVar = _contextvars.ContextVar('esfit_devices', default=None)
+
+
+def _cuda_index(dev) -> str:
+    """'cuda:1' / 1 / torch.device('cuda', 1) -> '1' (a CUDA_VISIBLE_DEVICES entry)."""
+    if isinstance(dev, int):
+        return str(dev)
+    d = torch.device(dev)
+    if d.type != 'cuda':
+        raise ValueError(f"FitOptions.devices takes CUDA devices, got {dev!r}")
+    return str(d.index or 0)
+
+
+def _pool_init(n_threads: int, device_queue=None):
+    import os as _os
+    if device_queue is not None:
+        # before any CUDA call in this worker, so the runtime only sees this GPU
+        _os.environ['CUDA_VISIBLE_DEVICES'] = device_queue.get()
     import torch as _torch
     _torch.set_num_threads(n_threads)
 
@@ -1532,28 +1578,25 @@ def _get_pool(n_proc: int, per: int):
     thread pool exists), created once and reused across generations/calls."""
     global _POOL
     import multiprocessing as mp
-    if _POOL is not None and _POOL[0] == n_proc and _POOL[1] == per:
+    devices = _FIT_DEVICES.get()
+    devices = tuple(_cuda_index(d) for d in devices) if devices else None
+    if _POOL is not None and _POOL[0] == n_proc and _POOL[1] == per and _POOL[3] == devices:
         return _POOL[2]
     if _POOL is not None:
         _POOL[2].terminate()
     # the children inherit the environment at spawn: cap the BLAS/OpenMP thread
     # pools of numpy/scipy/torch per worker (otherwise every worker starts one
     # thread per core and the pool thrashes)
-    import os
-    saved = {k: os.environ.get(k) for k in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS')}
-    for k in saved:
-        os.environ[k] = str(per)
-    try:
-        from torchspin._omp import passive_for_children
-        with passive_for_children():
-            pool = mp.get_context('spawn').Pool(n_proc, initializer=_pool_init, initargs=(per,))
-    finally:
-        for k, v in saved.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
-    _POOL = (n_proc, per, pool)
+    from torchspin.parallel import native_thread_env
+    ctx = mp.get_context('spawn')
+    queue = None
+    if devices:
+        queue = ctx.Queue()
+        for k in range(n_proc):
+            queue.put(devices[k % len(devices)])
+    with native_thread_env(per):
+        pool = ctx.Pool(n_proc, initializer=_pool_init, initargs=(per, queue))
+    _POOL = (n_proc, per, pool, devices)
     return pool
 
 
@@ -1576,6 +1619,14 @@ class _CloudPickled:
         return {'_blob': self._blob, '_fn': None}
 
 
+def _threads_per_worker(n_workers: int) -> int:
+    """Inner threads per outer worker so that workers × threads fits the core budget."""
+    import torch as _torch
+    from torchspin.parallel import cpu_budget
+    total = min(_torch.get_num_threads(), cpu_budget())
+    return max(1, total // max(1, n_workers))
+
+
 def _resolve_workers(n_workers, n: int) -> int:
     """'auto' → the cores this process may use (affinity / SLURM aware), capped by the
     available memory (about 0.5 GB per worker, half the free memory), by 32 and by
@@ -1584,6 +1635,90 @@ def _resolve_workers(n_workers, n: int) -> int:
         from torchspin._resources import auto_workers
         return auto_workers(n)
     return int(n_workers or 1)
+
+
+def _ship(raw: Callable):
+    """``raw`` in a form a spawned worker can run, or None if it cannot be sent.
+
+    By value through cloudpickle whenever possible: pickling by reference succeeds
+    for functions defined in a notebook's __main__, but the spawned worker cannot
+    resolve them, dies before registering the task and the map hangs forever.
+    By reference only for functions from importable modules.
+    """
+    try:
+        return _CloudPickled(raw)
+    except Exception:
+        import pickle
+        mod = getattr(raw, '__module__', None)
+        if mod not in (None, '__main__', '__mp_main__'):
+            try:
+                pickle.dumps(raw)
+                return raw
+            except Exception:
+                return None
+    return None
+
+
+def _map_points(raw: Callable, X, n_workers, workers: str = 'auto',
+                on_chunk: Optional[Callable] = None, step: Optional[int] = None,
+                size_hint: Optional[int] = None) -> list:
+    """``[raw(x) for x in X]``, evaluated concurrently, results in input order.
+
+    ``workers='auto'|'processes'`` uses the cached spawn pool (cores split between
+    the workers, see :func:`_threads_per_worker`); ``'threads'``, or an objective
+    that cannot be sent to a process, uses a thread pool. ``on_chunk(Xc, Fc)`` runs
+    in this process after every chunk of ``step`` points (default: all at once).
+    ``size_hint`` is the largest batch the caller will send: with ``'auto'`` the
+    process pool is sized for it, so batches of different sizes within one fit
+    reuse one pool instead of respawning it.
+    """
+    global _POOL
+    X = list(X)
+    n = len(X)
+    if n <= 1:
+        n_workers = 1
+    else:
+        n_workers = _resolve_workers(n_workers, max(n, int(size_hint or 0)))
+    if n_workers <= 1 or n <= 1:
+        out = [raw(x) for x in X]
+        if on_chunk is not None:
+            on_chunk(X, out)
+        return out
+    if workers in ('auto', 'processes'):
+        fn = _ship(raw)
+        if fn is not None:
+            n_proc = n_workers if size_hint else min(n_workers, n)
+            pool = _get_pool(n_proc, _threads_per_worker(n_proc))
+            step = n if not step else max(1, int(step))
+            out = []
+            try:
+                for s in range(0, n, step):
+                    fc = pool.map(fn, X[s:s + step], chunksize=1)
+                    out.extend(fc)
+                    if on_chunk is not None:
+                        on_chunk(X[s:s + step], fc)
+            except (KeyboardInterrupt, _StopFit):
+                # do not leave the cached pool grinding the interrupted batch
+                try:
+                    pool.terminate()
+                finally:
+                    _POOL = None
+                raise
+            return out
+        if workers == 'processes':
+            warnings.warn("esfit: objective is not picklable and cloudpickle is not installed; using a thread pool")
+    from concurrent.futures import ThreadPoolExecutor
+    # No per-worker thread_budget here. A smaller inner budget makes _linalg skip its
+    # serialized single-threaded LAPACK pool, but the native BLAS/OpenMP thread count
+    # is process-wide and cannot be capped per Python thread: each worker then calls
+    # LAPACK at the full process width, and n_workers x native threads oversubscribe
+    # the cores (measured 2.1x slower at 8 threads for the matrix method). The process
+    # backend is the one that partitions cores.
+    with ThreadPoolExecutor(max_workers=min(n_workers, n)) as ex:
+        out = list(ex.map(raw, X))
+    if on_chunk is not None:
+        on_chunk(X, out)
+    return out
 
 
 def _eval_population(
@@ -1595,67 +1730,103 @@ def _eval_population(
     """Evaluate ``objective_fn`` on each row of ``X``.
 
     ``n_workers > 1`` (or ``'auto'``, see :class:`FitOptions`) evaluates the rows
-    concurrently.  ``workers='processes'`` uses a spawned process pool with one
-    torch thread per worker — the effective option for torchspin forward models,
-    whose Python-level work holds the GIL.  The objective is pickled by
+    concurrently.  ``workers='processes'`` uses a spawned process pool with the
+    cores split between the workers — the effective option for torchspin forward
+    models, whose Python-level work holds the GIL.  The objective is pickled by
     value through ``cloudpickle`` (so functions defined in a notebook cell and
     closures work); without cloudpickle, only objectives from importable modules
     can be sent by reference and the rest fall back to a thread pool.
     ``workers='threads'`` forces the thread pool.
     """
-    global _POOL
     n = X.shape[0]
-    n_workers = _resolve_workers(n_workers, n)
-    if n_workers <= 1 or n <= 1:
+    if _resolve_workers(n_workers, n) <= 1 or n <= 1:
         return np.array([objective_fn(x) for x in X])
     # the progress tracker stays in this process: workers get the raw objective and
     # the parent merges each chunk of results (count, best-so-far, stop checks)
     raw = objective_fn.raw if isinstance(objective_fn, _TrackedObjective) else objective_fn
     tracker = _tracker_of(objective_fn)
-    if workers in ('auto', 'processes'):
-        # Ship the objective by value (cloudpickle) whenever possible: pickling by
-        # reference succeeds for functions defined in a notebook's __main__ but the
-        # spawned worker cannot resolve them, dies before registering the task and
-        # the map hangs forever.  Reference pickling only for importable modules.
-        fn = None
-        try:
-            fn = _CloudPickled(raw)
-        except Exception:
-            import pickle
-            mod = getattr(raw, '__module__', None)
-            if mod not in (None, '__main__', '__mp_main__'):
-                try:
-                    pickle.dumps(raw); fn = raw
-                except Exception:
-                    fn = None
-        if fn is not None:
-            import torch as _torch
-            n_proc = min(n_workers, n)
-            per = max(1, _torch.get_num_threads() // n_proc)
-            pool = _get_pool(n_proc, per)
-            step = n if not tracker.active else max(2 * n_proc, int(tracker.options.progress_every or 0))
-            out = []
-            try:
-                for s in range(0, n, step):
-                    fc = pool.map(fn, list(X[s:s + step]), chunksize=1)
-                    out.extend(fc)
-                    tracker.record_batch(X[s:s + step], fc)
-            except (KeyboardInterrupt, _StopFit):
-                # do not leave the cached pool grinding the interrupted generation
-                try:
-                    pool.terminate()
-                finally:
-                    _POOL = None
-                raise
-            return np.array(out)
-        if workers == 'processes':
-            import warnings
-            warnings.warn("esfit: objective is not picklable and cloudpickle is not installed; using a thread pool")
-    from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=min(n_workers, n)) as ex:
-        F = np.array(list(ex.map(raw, list(X))))
-    tracker.record_batch(X, F)
-    return F
+    step = None
+    if tracker.active and workers in ('auto', 'processes'):
+        n_proc = min(_resolve_workers(n_workers, n), n)
+        step = max(2 * n_proc, int(tracker.options.progress_every or 0))
+    return np.array(_map_points(raw, list(X), n_workers, workers, on_chunk=tracker.record_batch, step=step))
+
+
+class _ParentRecorded:
+    """A residual or objective function SciPy may evaluate in worker processes.
+
+    Calls made directly by the optimizer, in the thread that built the wrapper,
+    are recorded in the tracker. Finite-difference probes that SciPy hands to the
+    ``workers`` map (see :func:`_scipy_map`) are recorded there instead, so every
+    evaluation is counted once. The tracker never leaves this process.
+    """
+
+    def __init__(self, raw: Callable, tracker: '_FitProgress', to_f: Callable):
+        import threading
+        self.raw, self.tracker, self.to_f = raw, tracker, to_f
+        self._owner = threading.get_ident()
+
+    def __call__(self, x):
+        out = self.raw(x)
+        if self.tracker is not None:
+            import threading
+            if threading.get_ident() == self._owner:
+                self.tracker.record(x, self.to_f(out))
+        return out
+
+    def __getstate__(self):
+        return {'raw': self.raw, 'tracker': None, 'to_f': self.to_f, '_owner': None}
+
+
+def _scipy_map(options: 'FitOptions', tracker: '_FitProgress', to_f: Callable, size_hint: int):
+    """A ``workers`` map for SciPy's finite differences, or None to stay sequential."""
+    if _resolve_workers(options.n_workers, 2) <= 1:
+        return None
+
+    def mapper(fn, iterable):
+        def record(Xc, Fc):
+            tracker.record_batch(Xc, [to_f(f) for f in Fc])
+        return _map_points(fn, list(iterable), options.n_workers, options.workers, on_chunk=record,
+                           size_hint=size_hint)
+    return mapper
+
+
+def _scipy_takes_workers(solver: str) -> bool:
+    import inspect
+    try:
+        if solver == 'trf':
+            return 'workers' in inspect.signature(least_squares).parameters
+        from scipy.optimize._lbfgsb_py import _minimize_lbfgsb
+        return 'workers' in inspect.signature(_minimize_lbfgsb).parameters
+    except Exception:
+        return False
+
+
+def _scalar(f) -> float:
+    """A scalar objective value; SciPy's wrappers may hand back a 1-element array."""
+    return float(np.asarray(f, dtype=float).ravel()[0])
+
+
+def _rms(r) -> float:
+    r = np.asarray(r, dtype=float).ravel()
+    return float(np.sqrt(np.mean(r * r)))
+
+
+def _finite_residuals(p, resid_fn):
+    r = np.asarray(resid_fn(p), dtype=float).ravel()
+    if not np.all(np.isfinite(r)):
+        raise ValueError('residuals contain NaN or Inf')
+    return r
+
+
+def _bounded_residuals(pvec, lb, ub, data, model_wrapper, param_handler, options):
+    """Residual vector at ``pvec`` clipped to the bounds (picklable for worker pools)."""
+    return compute_residuals(np.clip(pvec, lb, ub), data, model_wrapper, param_handler, options)[0]
+
+
+def _plain_residuals(pvec, data, model_wrapper, param_handler, options):
+    """Residual vector at ``pvec`` (picklable for worker pools)."""
+    return compute_residuals(pvec, data, model_wrapper, param_handler, options)[0]
 
 
 def _optimize_grid(
@@ -2057,8 +2228,8 @@ def _optimize_levmar(
     n_eval = [0]
     tracker = _tracker_of(objective_fn)
 
-    def funeval(x):
-        f = np.asarray(resid_fn(untransform(x)), dtype=float).ravel()
+    def finish(x, f):
+        f = np.asarray(f, dtype=float).ravel()
         n_eval[0] += 1
         if not np.all(np.isfinite(f)):
             raise ValueError('residuals contain NaN or Inf')
@@ -2068,13 +2239,28 @@ def _optimize_levmar(
         tracker.record(untransform(x), np.sqrt(F / max(1, f.size)))
         return F, f
 
+    def funeval(x):
+        return finish(x, resid_fn(untransform(x)))
+
     x = np.clip(transform(np.asarray(p0, dtype=float)), xlb, xub)
-    F, f = funeval(x)
-    J = np.zeros((f.size, n))
+    # the start point and its n forward-difference probes are independent: with
+    # n_workers > 1 they are evaluated concurrently, then recorded in order
+    probes = []
     for i in range(n):
         x1 = x.copy(); x1[i] += delta
-        _, f1 = funeval(x1)
-        J[:, i] = (f1 - f) / delta
+        probes.append(x1)
+    if _resolve_workers(options.n_workers, n + 1) > 1:
+        # pool sized for the largest batch of the fit (the 2n-probe uncertainty Jacobian)
+        R = _map_points(resid_fn, [untransform(xi) for xi in [x] + probes], options.n_workers, options.workers,
+                        size_hint=2 * n)
+        F, f = finish(x, R[0])
+        fp = [finish(xi, r)[1] for xi, r in zip(probes, R[1:])]
+    else:
+        F, f = funeval(x)
+        fp = [funeval(xi)[1] for xi in probes]
+    J = np.zeros((f.size, n))
+    for i in range(n):
+        J[:, i] = (fp[i] - f) / delta
     _warn_dead_jacobian_columns(J, 'levmar')
     g = J.T @ f
     norm_g = np.linalg.norm(g, ord=np.inf)
@@ -2157,19 +2343,21 @@ def _optimize_trf(
     lb, ub = (np.asarray(b, dtype=float) for b in bounds)
     tracker = _tracker_of(objective_fn)
 
-    def residual(p):
-        r = np.asarray(resid_fn(p), dtype=float).ravel()
-        if not np.all(np.isfinite(r)):
-            raise ValueError('residuals contain NaN or Inf')
-        # sqrt(mean(r^2)) is exactly the RMSD compute_residuals reports
-        tracker.record(p, float(np.sqrt(np.mean(r * r))))
-        return r
-
+    import functools
+    # sqrt(mean(r^2)) is exactly the RMSD compute_residuals reports
+    residual = _ParentRecorded(functools.partial(_finite_residuals, resid_fn=resid_fn), tracker, _rms)
+    kw = {}
+    mapper = _scipy_map(options, tracker, _rms, 2 * len(p0))
+    if mapper is not None:
+        if _scipy_takes_workers('trf'):
+            kw['workers'] = mapper
+        else:
+            warnings.warn("esfit: parallel trf Jacobians need SciPy >= 1.16; evaluating them sequentially")
     x0 = np.clip(np.asarray(p0, dtype=float), lb, ub)
     fit = least_squares(residual, x0, bounds=(lb, ub), method='trf',
                         x_scale=options.trf_x_scale, diff_step=options.trf_diff_step,
                         max_nfev=int(options.max_iter), ftol=options.tol_fun, xtol=options.tol_x,
-                        gtol=options.trf_gradient_tol)
+                        gtol=options.trf_gradient_tol, **kw)
     # SciPy reports no iteration count for 'trf'; each trust-region iteration
     # evaluates the Jacobian once, so njev is the closest measure.
     n_iter = fit.njev if getattr(fit, 'njev', None) is not None else fit.nfev
@@ -2229,15 +2417,16 @@ def _estimate_uncertainties(
         'cov': covariance matrix
         'corr': correlation matrix
     """
-    # Define residual function
-    def residuals_fn(pvec):
-        residuals, _, _ = compute_residuals(
-            pvec, data, model_wrapper, param_handler, options
-        )
-        return residuals
-    
-    # Compute Jacobian via finite differences
-    J_all = _jacobian_finite_diff(residuals_fn, pfit)
+    # Residual function: a partial of a module-level function on a copy of the
+    # options without the in-process callables, so it pickles for the worker pool
+    import functools
+    from dataclasses import replace as _replace
+    residuals_fn = functools.partial(
+        _plain_residuals, data=data, model_wrapper=model_wrapper, param_handler=param_handler,
+        options=_replace(options, progress=None, stop_when=None, callback=None))
+
+    # Compute Jacobian via finite differences (probes concurrent with n_workers > 1)
+    J_all = _jacobian_finite_diff(residuals_fn, pfit, n_workers=options.n_workers, workers=options.workers)
     # A parameter the residuals do not depend on would get sigma = 0 from pinv,
     # which reads as perfectly determined. Report it as undetermined (nan)
     # instead and leave it out of the covariance of the others.
@@ -2303,22 +2492,35 @@ def _estimate_uncertainties(
 def _jacobian_finite_diff(
     fn: Callable,
     x: np.ndarray,
-    eps: float = 1e-7
+    eps: float = 1e-7,
+    n_workers=1,
+    workers: str = 'auto',
 ) -> np.ndarray:
-    """Compute Jacobian via central finite differences."""
+    """Compute Jacobian via central finite differences.
+
+    The 2n probes are independent; with ``n_workers > 1`` they are evaluated
+    concurrently (see :func:`_map_points`).
+    """
     n_params = len(x)
-    f0 = fn(x)
-    n_data = len(f0)
-    J = np.zeros((n_data, n_params))
-    
+    steps, plus, minus = [], [], []
     for i in range(n_params):
         x_plus = x.copy()
         x_minus = x.copy()
         step = eps * max(abs(x[i]), 1.0)
         x_plus[i] += step
         x_minus[i] -= step
-        J[:, i] = (fn(x_plus) - fn(x_minus)) / (2*step)
-    
+        steps.append(step); plus.append(x_plus); minus.append(x_minus)
+    if _resolve_workers(n_workers, 2 * n_params) > 1:
+        R = _map_points(fn, plus + minus, n_workers, workers, size_hint=2 * n_params)
+        fp, fm = R[:n_params], R[n_params:]
+    else:
+        fp, fm = [], []
+        for i in range(n_params):
+            fp.append(fn(plus[i])); fm.append(fn(minus[i]))
+    n_data = len(np.asarray(fp[0]).ravel())
+    J = np.zeros((n_data, n_params))
+    for i in range(n_params):
+        J[:, i] = (np.asarray(fp[i]) - np.asarray(fm[i])) / (2 * steps[i])
     return J
 
 
@@ -2499,119 +2701,126 @@ def esfit(
     if options.method not in ('simplex', 'lbfgsb', 'powell', 'grid', 'montecarlo', 'genetic', 'swarm', 'global', 'levmar', 'trf'):
         raise ValueError(f"Unknown method: '{options.method}'")
 
-    tracker.start()
+    # FitOptions.devices for the worker pools of this fit only; reset on every exit path,
+    # so a later pool (another fit, ml.simulate_batch) is not pinned to this fit's GPUs
+    _dev_token = _FIT_DEVICES.set(list(options.devices) if options.devices else None)
     try:
-        if options.method == 'simplex':
-            opt_result = _optimize_simplex(tracked, pvec_0, (lb_vec, ub_vec), options)
-        elif options.method == 'lbfgsb':
-            opt_result = _optimize_lbfgsb(tracked, pvec_0, (lb_vec, ub_vec), options)
-        elif options.method == 'powell':
-            opt_result = _optimize_powell(tracked, pvec_0, (lb_vec, ub_vec), options)
-        elif options.method == 'grid':
-            opt_result = _optimize_grid(tracked, pvec_0, (lb_vec, ub_vec), options)
-        elif options.method == 'montecarlo':
-            opt_result = _optimize_montecarlo(tracked, pvec_0, (lb_vec, ub_vec), options)
-        elif options.method == 'genetic':
-            opt_result = _optimize_genetic(tracked, pvec_0, (lb_vec, ub_vec), options)
-        elif options.method == 'swarm':
-            opt_result = _optimize_swarm(tracked, pvec_0, (lb_vec, ub_vec), options)
-        elif options.method == 'global':
-            opt_result = _optimize_global(tracked, pvec_0, (lb_vec, ub_vec), options)
-        else:
-            def resid_fn(pvec):
-                return compute_residuals(np.clip(pvec, lb_vec, ub_vec), data, model_wrapper,
-                                         param_handler, worker_options)[0]
-            local_solver = _optimize_trf if options.method == 'trf' else _optimize_levmar
-            opt_result = local_solver(tracked, pvec_0, (lb_vec, ub_vec), options, resid_fn=resid_fn)
-    except KeyboardInterrupt:
-        opt_result = tracker.synthesize_result('KeyboardInterrupt')
-    except _StopFit as e:
-        opt_result = tracker.synthesize_result(e.reason)
-    finally:
-        tracker.finish()
+        tracker.start()
+        try:
+            if options.method == 'simplex':
+                opt_result = _optimize_simplex(tracked, pvec_0, (lb_vec, ub_vec), options)
+            elif options.method == 'lbfgsb':
+                opt_result = _optimize_lbfgsb(tracked, pvec_0, (lb_vec, ub_vec), options)
+            elif options.method == 'powell':
+                opt_result = _optimize_powell(tracked, pvec_0, (lb_vec, ub_vec), options)
+            elif options.method == 'grid':
+                opt_result = _optimize_grid(tracked, pvec_0, (lb_vec, ub_vec), options)
+            elif options.method == 'montecarlo':
+                opt_result = _optimize_montecarlo(tracked, pvec_0, (lb_vec, ub_vec), options)
+            elif options.method == 'genetic':
+                opt_result = _optimize_genetic(tracked, pvec_0, (lb_vec, ub_vec), options)
+            elif options.method == 'swarm':
+                opt_result = _optimize_swarm(tracked, pvec_0, (lb_vec, ub_vec), options)
+            elif options.method == 'global':
+                opt_result = _optimize_global(tracked, pvec_0, (lb_vec, ub_vec), options)
+            else:
+                # a partial of a module-level function, so it pickles for the worker pool
+                resid_fn = functools.partial(_bounded_residuals, lb=lb_vec, ub=ub_vec, data=data,
+                                             model_wrapper=model_wrapper, param_handler=param_handler,
+                                             options=worker_options)
+                local_solver = _optimize_trf if options.method == 'trf' else _optimize_levmar
+                opt_result = local_solver(tracked, pvec_0, (lb_vec, ub_vec), options, resid_fn=resid_fn)
+        except KeyboardInterrupt:
+            opt_result = tracker.synthesize_result('KeyboardInterrupt')
+        except _StopFit as e:
+            opt_result = tracker.synthesize_result(e.reason)
+        finally:
+            tracker.finish()
     
-    pfit_vec = opt_result.x
+        pfit_vec = opt_result.x
     
-    # 7. Compute final fit and residuals
-    residuals, rmsd, info = compute_residuals(
-        pfit_vec, data, model_wrapper, param_handler, options
-    )
-    if info.get('negative_scale'):
-        warnings.warn(
-            "esfit: lsq autoscale found a negative scale at the fitted parameters "
-            "(the model is anti-correlated with the data), so the scale was "
-            f"{'clipped to 0' if options.lsq_negative_scale == 'clip' else 'replaced by its absolute value'}. "
-            "Check the sign of the model: with autoscale='lsq' it must carry the "
-            "sign of the signal.", UserWarning, stacklevel=2)
-    
-    if options.verbosity > 0:
-        print(f"\nFinal RMSD: {rmsd:.6e}")
-        if rmsd_0 > 0:
-            print(f"Improvement: {(rmsd_0 - rmsd)/rmsd_0 * 100:.1f}%")
-        print(f"Success: {opt_result.success}")
-        print(f"Message: {opt_result.message}")
-    
-    # 8. Compute uncertainties if requested
-    if options.compute_uncertainties and opt_result.success:
-        if options.verbosity > 0:
-            print("\nComputing uncertainties...")
-        uncertainties = _estimate_uncertainties(
+        # 7. Compute final fit and residuals
+        residuals, rmsd, info = compute_residuals(
             pfit_vec, data, model_wrapper, param_handler, options
         )
-    else:
-        uncertainties = {
-            'pstd': None,
-            'ci95': None,
-            'cov': None,
-            'corr': None
-        }
+        if info.get('negative_scale'):
+            warnings.warn(
+                "esfit: lsq autoscale found a negative scale at the fitted parameters "
+                "(the model is anti-correlated with the data), so the scale was "
+                f"{'clipped to 0' if options.lsq_negative_scale == 'clip' else 'replaced by its absolute value'}. "
+                "Check the sign of the model: with autoscale='lsq' it must carry the "
+                "sign of the signal.", UserWarning, stacklevel=2)
     
-    # 9. Compute fit diagnostics
-    diagnostics = _compute_fit_diagnostics(info['residuals_raw'], info['fit'], len(pfit_vec))
+        if options.verbosity > 0:
+            print(f"\nFinal RMSD: {rmsd:.6e}")
+            if rmsd_0 > 0:
+                print(f"Improvement: {(rmsd_0 - rmsd)/rmsd_0 * 100:.1f}%")
+            print(f"Success: {opt_result.success}")
+            print(f"Message: {opt_result.message}")
     
-    # 10. Construct result object
-    result = FitResult(
-        pfit=pfit_vec,
-        pnames=pnames,
-        p_start=pvec_0,
-        p_fixed=param_handler.fixed_mask,
-        fit=info['fit'],
-        fit_raw=info['sim'],
-        residuals=info['residuals_raw'],
-        scale=info['scale'],
-        baseline=info['baseline'],
-        rmsd=rmsd,
-        ssr=np.sum(residuals**2),
-        n_params=len(pfit_vec),
-        n_data=len(data),
-        algorithm=options.method,
-        n_iterations=opt_result.nit if hasattr(opt_result, 'nit') else opt_result.nfev,
-        success=opt_result.success,
-        message=opt_result.message,
-        pstd=uncertainties['pstd'],
-        ci95=uncertainties['ci95'],
-        cov=uncertainties['cov'],
-        corr=uncertainties['corr'],
-        r_squared=diagnostics['r_squared'],
-        reduced_chi_square=diagnostics['reduced_chi_square'],
-        noise_std=diagnostics['noise_std'],
-        n_evaluations=tracker.n_evaluations,
-        elapsed_s=tracker.elapsed_s,
-        interrupted=tracker.interrupted,
-    )
+        # 8. Compute uncertainties if requested
+        if options.compute_uncertainties and opt_result.success:
+            if options.verbosity > 0:
+                print("\nComputing uncertainties...")
+            uncertainties = _estimate_uncertainties(
+                pfit_vec, data, model_wrapper, param_handler, options
+            )
+        else:
+            uncertainties = {
+                'pstd': None,
+                'ci95': None,
+                'cov': None,
+                'corr': None
+            }
     
-    if options.verbosity > 0:
-        print("\nFitted parameters:")
-        for i, (name, val, std) in enumerate(zip(pnames, pfit_vec, uncertainties['pstd'] if uncertainties['pstd'] is not None else [None]*len(pfit_vec))):
-            if std is not None:
-                print(f"  {name}: {val:.6e} ± {std:.6e}")
-            else:
-                print(f"  {name}: {val:.6e}")
-        print(f"\nFit quality:")
-        print(f"  RMSD:      {result.rmsd:.6e}")
-        print(f"  R²:        {result.r_squared:.6f}")
-        print(f"  Red. χ²:   {result.reduced_chi_square:.6f}")
-        print(f"  Noise std: {result.noise_std:.6e}")
-        print()
+        # 9. Compute fit diagnostics
+        diagnostics = _compute_fit_diagnostics(info['residuals_raw'], info['fit'], len(pfit_vec))
     
-    return result
+        # 10. Construct result object
+        result = FitResult(
+            pfit=pfit_vec,
+            pnames=pnames,
+            p_start=pvec_0,
+            p_fixed=param_handler.fixed_mask,
+            fit=info['fit'],
+            fit_raw=info['sim'],
+            residuals=info['residuals_raw'],
+            scale=info['scale'],
+            baseline=info['baseline'],
+            rmsd=rmsd,
+            ssr=np.sum(residuals**2),
+            n_params=len(pfit_vec),
+            n_data=len(data),
+            algorithm=options.method,
+            n_iterations=opt_result.nit if hasattr(opt_result, 'nit') else opt_result.nfev,
+            success=opt_result.success,
+            message=opt_result.message,
+            pstd=uncertainties['pstd'],
+            ci95=uncertainties['ci95'],
+            cov=uncertainties['cov'],
+            corr=uncertainties['corr'],
+            r_squared=diagnostics['r_squared'],
+            reduced_chi_square=diagnostics['reduced_chi_square'],
+            noise_std=diagnostics['noise_std'],
+            n_evaluations=tracker.n_evaluations,
+            elapsed_s=tracker.elapsed_s,
+            interrupted=tracker.interrupted,
+        )
+    
+        if options.verbosity > 0:
+            print("\nFitted parameters:")
+            for i, (name, val, std) in enumerate(zip(pnames, pfit_vec, uncertainties['pstd'] if uncertainties['pstd'] is not None else [None]*len(pfit_vec))):
+                if std is not None:
+                    print(f"  {name}: {val:.6e} ± {std:.6e}")
+                else:
+                    print(f"  {name}: {val:.6e}")
+            print(f"\nFit quality:")
+            print(f"  RMSD:      {result.rmsd:.6e}")
+            print(f"  R²:        {result.r_squared:.6f}")
+            print(f"  Red. χ²:   {result.reduced_chi_square:.6f}")
+            print(f"  Noise std: {result.noise_std:.6e}")
+            print()
+    
+        return result
+    finally:
+        _FIT_DEVICES.reset(_dev_token)

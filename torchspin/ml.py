@@ -237,28 +237,48 @@ def _worker(args):
 
 
 def simulate_batch(simulator, template: SpinSystem, exp, opt, spec: ParamSpec, params: torch.Tensor, *,
-                   grad: bool = False, workers: int = 0, **sim_kwargs):
+                   grad: bool = False, workers=0, **sim_kwargs):
     """Simulate every row of ``params`` (``(N, n_free)`` packed vectors).
 
     Returns ``(x, Y)`` with ``Y`` of shape ``(N, nPoints)``.  With ``grad=True``
-    the rows stay on the autograd graph (``params`` must ``requires_grad``);
-    with ``workers > 1`` (no-grad only) the rows are spread over a spawned
-    process pool with one torch thread per worker.
+    the rows stay on the autograd graph (``params`` must ``requires_grad``).
+    With ``workers > 1`` or ``workers='auto'`` (no-grad only) the rows are spread
+    over a spawned process pool with one torch thread per worker. The pool is
+    started on the first call and reused by later calls with the same worker
+    count (and by esfit), so a data-generation loop pays the start-up cost once.
+    ``'auto'`` sizes it by the allocated cores and the available memory, as in
+    :class:`torchspin.esfit.FitOptions`.
+
+    For training sets of large spin systems, raise ``opt.Threshold`` (default
+    1e-4, as in EasySpin). Rhombic g with non-equivalent nuclei keeps hundreds of
+    weak forbidden transitions per orientation, each costing an eigendecomposition.
+    For Cu(II) with two 14N, ``Threshold=1e-2`` was 3.6x faster and changed the
+    spectrum by 0.4 % (normalized RMS).
     """
     params = torch.as_tensor(params, dtype=_F64)
     if params.ndim == 1:
         params = params.unsqueeze(0)
     n = params.shape[0]
-    if workers and workers > 1 and not grad:
-        import multiprocessing as mp
-        ctx = mp.get_context('spawn')
+    if workers and workers != 1 and not grad:
+        from torchspin.esfit import _get_pool, _resolve_workers
+        n_proc = _resolve_workers(workers, n) if isinstance(workers, str) else int(workers)
+    else:
+        n_proc = 1
+    if n_proc > 1 and n > 1:
         tk = _template_kwargs(template)
         jobs = [(simulator, tk, spec, exp, opt, params[i].detach().numpy(), sim_kwargs) for i in range(n)]
-        from torchspin._omp import passive_for_children
-        with passive_for_children():
-            pool = ctx.Pool(workers)
-        with pool:
-            res = pool.map(_worker, jobs)
+        # the cached spawn pool shared with esfit: one torch thread per worker, native
+        # BLAS/OpenMP pools capped, OMP_WAIT_POLICY=PASSIVE (torchspin.parallel.native_thread_env)
+        pool = _get_pool(n_proc, 1)
+        try:
+            res = pool.map(_worker, jobs, chunksize=max(1, n // (4 * n_proc)))
+        except KeyboardInterrupt:
+            # do not leave the shared pool working through the rest of the batch
+            import importlib
+            _ef = importlib.import_module('torchspin.esfit')
+            pool.terminate()
+            _ef._POOL = None
+            raise
         x = torch.as_tensor(res[0][0])
         return x, torch.stack([torch.as_tensor(r[1]) for r in res])
     ys, x = [], None
